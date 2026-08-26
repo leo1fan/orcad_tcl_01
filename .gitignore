@@ -1,0 +1,19 @@
+# 這個 repo 位於 Cadence SPB 17.4 安裝目錄底下。
+# 策略：預設忽略全部（原廠檔案），只白名單自己維護的檔案。
+
+/*
+
+!/.gitignore
+!/.claude/
+!/Develope.md
+!/mUtilMenu-tree.md
+
+# capAutoLoad 底下只追蹤自己寫的 mUtilMenu.tcl
+!/capAutoLoad/
+/capAutoLoad/*
+!/capAutoLoad/mUtilMenu.tcl
+
+# Claude Code 本機設定 / 執行痕跡不進版控
+.claude/settings.local.json
+.claude/shell-snapshots/
+.claude/todos/
