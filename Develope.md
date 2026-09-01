@@ -823,4 +823,296 @@ source {G:/Cadence/SPB_17.4/tools/capture/tclscripts/capAutoLoad/mUtilMenu.tcl}
 
 ---
 
-## 項目 5 — (待新增)
+## 項目 5 — mUtilMenu.tcl 用到的 DBO 核心程序總整理
+
+**日期**:2026-08-31
+**狀態**:文件,對應 `mUtilMenu.tcl` 5228 行版本(143 個 proc)
+**變更檔案**:無(本節只描述現況)
+
+這節把整個開發過程用到的 **DBO(Design Base Object)API** 收在一起。項目 2 的 2.2 只列了「出處」,這裡列的是「怎麼用、包在哪支 proc 裡、踩過什麼坑」。
+
+> 一句話原則:**Appendix A 沒有的就去 `tools\bin\orDb_Dll_Tcl64.dll` 查 SWIG wrapper**,再不然找原廠 script 的實際使用點。三種來源在下面每一項都標出來了。
+
+### 5.1 三個基礎物件 — 所有 DBO 呼叫的前置
+
+| 呼叫 | 用途 | 備註 |
+|---|---|---|
+| `$::DboSession_s_pDboSession` | Capture 已建好的 session 指標 | **不需要任何 init**,原廠 14 個檔案共同寫法 |
+| `DboSession -this $lSession` | 把指標包成 Tcl 物件 | PDF 3.2.2(p.29) |
+| `DboState` | 每次走訪都要一個狀態物件 | 用完 `catch { $lStatus -delete }`,**不刪會 leak** |
+| `DboTclHelper_sMakeCString ?str?` | 建 CString(傳入/接回都要) | PDF p.28 |
+| `DboTclHelper_sGetConstCharPtr` | CString → Tcl string | 同上 |
+
+固定開頭三行,`GetDesignPages` L893、`FindPageObjs` L3251、`FindDesign` L4245、`MarkPageNameChanged` L4212 都是這段:
+
+```tcl
+set lSession $::DboSession_s_pDboSession
+DboSession -this $lSession
+set lStatus [DboState]
+set lPath   [DboTclHelper_sMakeCString [file normalize $pDsnPath]]
+set lDesign [$lSession GetDesignAndSchematics $lPath $lStatus]
+```
+
+`GetDesignAndSchematics` 回 `NULL` 就是設計沒在 session 裡 — 這也是為什麼 `DoSchematicCompareExecute` 一定要先 `Open`。
+
+### 5.2 階層走訪:design → schematic → page
+
+| 呼叫 | 物件 | PDF / 出處 |
+|---|---|---|
+| `GetDesignAndSchematics {cstr} {status}` | DboSession | 3.2.4 p.29 |
+| `NewViewsIter {status} $::IterDefs_SCHEMATICS` | DboDesign | 3.2.7 p.30 |
+| `NextView {status}` | DboLibViewsIter | 同上 |
+| `DboViewToDboSchematic` | 型別轉換(dynamic cast) | 3.2.7 |
+| `NewPagesIter {status}` | DboSchematic | 3.2.9 p.31 |
+| `NextPage {status}` | DboSchematicPagesIter | 同上 |
+| `GetName {cstr}` | DboSchematic / DboPage | 回 CString,要配 `CStr` helper |
+| `GetRootName {cstr}` | DboDesign | `RestorePMSelection` / `diagSaveState` 用 |
+| `IsModified {status}` | DboDesign | `diagSaveState` L5214 |
+
+這段走訪在檔案裡出現 **兩次**,刻意不合併:
+
+- `GetDesignPages` L889 — 蒐集全部 `{schematic page}`,給 page selector
+- `FindPageObjs` L3246 — 只找一頁,**同時回傳 schematic 物件**(改頁名要靠它)
+
+> `FindPage` L3295 是 `FindPageObjs` 取 index 1 的薄包裝。**page 物件屬於 design 而不是 iterator**,所以 iterator 刪掉之後 page 還能用 — `DrawMarkersOnPage` 整批共用一次 lookup 就是靠這點(否則 O(n²))。
+
+### 5.3 Page 層物件走訪 — 四大類
+
+**(1) Parts** — `CollectPageParts` L1460
+
+```
+$lPage NewPartInstsIter {status}          → NextPartInst
+  $lInst GetObjectType == $::DboBaseObject_PLACED_INSTANCE   ← 過濾階層方塊
+  DboPartInstToDboPlacedInst $lInst
+    GetSourceLibName {cstr}      來源 .olb
+    GetPackage {status} → GetName  package 名
+    GetEffectivePropStringValue    Part Reference / Value / PCB Footprint /
+                                   Part_Number / Optional
+    GetLocation {status}  GetBoundingBox
+    NewPinsIter {status} → NextPin  (見下)
+```
+
+**(2) Pins** — `CollectPinInfo` L1302,**page 層就能拿到 pin↔net**
+
+| 呼叫 | 回什麼 | 來源 |
+|---|---|---|
+| `GetPinName {cstr}` | "VCC" / "A0" | capPortPinMismatch.tcl:109 |
+| `GetPinNumber {cstr}` | 實體腳位號 | **DLL**,Appendix A 沒有 |
+| `GetIsNoConnect {status}` | 有沒有 X 記號 | **DLL** |
+| `GetNet {status}` | 該 pin 的 page DboNet,沒接回 NULL | **DLL** |
+| `GetOffsetHotSpot {status}` | pin 的**連接點**(線落在哪) | capPdfUtil.tcl:1203-1209 |
+| `DboPartInst_sGetPinCount` / `$part GetPinCount` | pin 數,不用走 iterator | **DLL**,兩種拼法都試 |
+
+> `NextPin` 回的是 **DboPortInst**,連線資訊在物件本身 —— 所以 **不需要**走 flatten 後的 occurrence(`DboNetOccurrence GetNet`)。這是項目 2 的 2.7「沒有 pin ↔ net 對應」被推翻的地方。
+>
+> pin 有兩個端點:`GetOffsetStartPoint` = 接部件本體那端,`GetOffsetHotSpot` = **自由端**,net wire 落在這裡。`Offset*` 這組已經把 instance 的擺放/旋轉/鏡射算進去,可以直接跟 wire 端點比 —— net_compare_rule4 靠的就是這個數字。
+
+**(3) Symbols(Off-Page / Power/GND / Port)** — `CollectPageSymbols` L3028
+
+```
+NewOffPageConnectorsIter {status} ?$::IterDefs_ALL?  → NextOffPageConnector
+NewGlobalsIter           {status}                    → NextGlobal    ← power 和 GND 同一桶
+NewPortsIter             {status}                    → NextPort
+   三者共用 GetName / GetLocation / GetBoundingBox
+```
+
+三種其實底層都是 **DboNetSymbolInstance**(DLL 查證),所以連線也共用一條路 —— `SymbolConn` L1389:
+
+```
+1  $obj GetNet  {status}   →  NetLabelOf
+2  $obj GetWire {status}   →  該 wire 的 GetNet / aliases
+3  ""                       什麼都沒接
+```
+
+`NewOffPageConnectorsIter` 的參數數量原廠不一致(capProcessDRC.tcl:81 給 `IterDefs_ALL`、orPrmDboStreamer.tcl:1900 不給),所以**先試兩個參數再試一個**。
+
+**(4) Nets / Buses**
+
+```
+Nets  (CollectPageNets L3179)
+  DboPageNetsIter <cmdName> $pPage $::IterDefs_ALL     ← SWIG constructor,見 5.6
+    → NextNet {status}
+      $lNet NewWiresIter {status} → NextWire           ← 方法型
+        GetStartPoint / GetEndPoint
+        NewAliasesIter → NextAlias → GetName           ← net 名字的唯一來源
+
+Buses (CollectPageBuses L3121)
+  $lPage NewWiresIter {status} → NextWire
+    $lWire GetObjectType 比對 $::DboBaseObject_WIRE_BUS / _WIRE_BUNDLE
+```
+
+> **page 層的 DboNet 沒有自己的名字**,名字在 wire alias 上。`NetLabel` L1127 的順序:aliases → `GetName` → `Net Name`/`Name` 屬性 → `(unnamed)`。
+> bus 不是獨立物件,是 `GetObjectType` 為 `WIRE_BUS` 的 wire(同 capObjectAlignment.tcl:371-373)。常數用 `info exists` 檢查,缺了就當作「不是 bus」而不是整個迴圈掛掉。
+
+### 5.4 屬性 / 字串 / 座標 helper
+
+| mUtilMenu proc | 行 | 包住的 DBO 呼叫 |
+|---|---|---|
+| `CStr {obj getter}` | L1157 | `sMakeCString` + `$obj $getter` + `sGetConstCharPtr` |
+| `PropStr {obj name}` | L999 | `GetEffectivePropStringValue`(**effective 值**:instance 覆寫優先) |
+| `PropStrAny {obj names}` | L1147 | 依序試多個屬性名(`Part_Number` / `Part Number`) |
+| `Coord {page doc}` | L1010 | `GetPhysicalGranularity`,doc → 英吋 |
+| `PointStr` | L1033 | `sGetCPointX` / `sGetCPointY` |
+| `ObjLocStr` | L1045 | `GetLocation` + `GetBoundingBox` + `sGetCRectTopLeft/BottomRight` |
+| `ObjBBoxDoc` | L1063 | 同上,但回**原始整數** `{l t r b}` — 畫框用 |
+| `WireSegStr` / `WireSegDoc` | L1076 / L1088 | `GetStartPoint` / `GetEndPoint` |
+| `WireAliases` | L1102 | `NewAliasesIter` / `NextAlias` / `GetName` |
+| `PinHotSpotDoc` | L1207 | `GetOffsetHotSpot` |
+| `PartPinCount` | L1244 | `DboPartInst_sGetPinCount` → `GetPinCount` |
+
+**座標兩套單位,不能混**:`Str` 結尾的印出來給人看(已 `%.2f` 四捨五入),`Doc` 結尾的是原始整數 —— **畫線/畫框一律用 Doc**,絕不從印出來的字串回頭 parse。page 座標 **y 軸向下**(所以 CRect 的 top 是較小的 y)。
+
+### 5.5 寫入設計 — 全檔唯一會改資料庫的部分
+
+| 呼叫 | 物件 | 來源 |
+|---|---|---|
+| `NewGraphicLineInst {status} {start} {end} {origin} {rotation}` | DboPage | DLL |
+| `NewGraphicBoxInst {status} {rect} {origin} {rotation}` | DboPage | DLL |
+| `SetColor` / `SetLineWidth` / `SetLineStyle` / `SetFillStyle` | DboGraphic*Inst | DLL |
+| `DboTclHelper_sMakeCPoint x y` / `sMakeCRect l t r b` | 建座標參數 | — |
+| `Rename {pageObj} {cstr}` | **DboSchematic** | DLL |
+| `RenameObject {pageObj} {cstr}` | DboDesign(備援) | DLL |
+| `MarkModified` | DboPage / DboSchematic / DboDesign | Appendix A p.171(只有無參數版) |
+
+三個關鍵細節:
+
+**(1) `DboPage` 沒有 `SetName`。** DLL 裡只有 `DboPage_GetName` 和 `DboPage_MarkModified`。改頁名要走 **schematic** 的 `Rename(pObj, newName)`,所以 `FindPageObjs` 才要一併回傳 schematic 物件。
+
+**(2) 每個 setter 都回一個新的 `DboState`,不刪就漏。** 這是 `DboSet` L3854 存在的理由:
+
+```tcl
+proc ::mUtilMenu::DboSet { pObj pMethod args } {
+    if { [catch { set lState [eval [list $pObj $pMethod] $args] } lErr] } { ... return 0 }
+    catch { set lOK [$lState OK] }
+    catch { $lState -delete }        ;# ← 少這行就是每次呼叫漏一個 SWIG 物件
+    return $lOK
+}
+```
+
+**(3) `MarkModified` 不是同一個呼叫。** 每個 class 自己宣告、arity 不同:
+
+```
+DboPage::MarkModified()                    無參數
+DboSchematic::MarkModified(DboPage*)       裡面那一頁
+DboDesign::MarkModified(DboOccurrence*)    一個 occurrence,沒有就 NULL
+DboLib::MarkModified(DboCell* / ...)       自己還有好幾個 overload
+```
+
+Appendix A p.171 只寫了被這些衍生版**遮蔽**的無參數 `DboBaseObject::MarkModified()`,所以當初 `$lDesign MarkModified` 每改一頁就印一次 `Wrong number of arguments`,**根本沒寫進資料庫**。`MarkObjModified` L3898 的做法是:先試給定的參數,再試無參數,兩種都不收才抱怨。`$lDesign MarkModified NULL` 是原廠認可的寫法(capReplacePathInCache.tcl:736)。
+
+改完一定要 `MarkModified` + `ZoomRedraw`(capDesignUtil.tcl:301-304, :396 的模式)。**存檔留給使用者按 File > Save**,程式不自己存。
+
+### 5.6 Iterator 的三種形式與生命週期 ★最容易寫錯的地方
+
+| 形式 | 寫法 | 收尾 |
+|---|---|---|
+| **方法型** | `set lIter [$obj NewXxxIter $status]` | `catch { delete_Dbo<Class>XxxIter $lIter }` |
+| **SWIG constructor 型** | `DboPageNetsIter <cmdName> $page $iterDefs` | `NextIterName` 發名 + `DropIter` 收 |
+| **method 型 alias** | `$wire NewAliasesIter $status` | `delete_DboWireAliasesIter` |
+
+本檔用到的 10 個 `delete_*`:
+
+```
+delete_DboLibViewsIter                delete_DboSchematicPagesIter
+delete_DboPagePartInstsIter           delete_DboPartInstPinsIter
+delete_DboPageWiresIter               delete_DboNetWiresIter
+delete_DboWireAliasesIter             delete_DboPageGlobalsIter
+delete_DboPageOffPageConnectorsIter   delete_DboPagePortsIter
+```
+
+**SWIG constructor 型的坑**:`DboPageNetsIter` 不回 handle,而是**建立一個同名的 Tcl command**。原廠 `capShortNet.tcl` 直接寫死 `lPageNetsIter` 且從不刪 —— 連按兩次 Compare 就撞名爆掉。解法:
+
+```tcl
+proc ::mUtilMenu::NextIterName { pTag } { variable mIterSeq; return "mUtilIter${pTag}[incr mIterSeq]" }
+proc ::mUtilMenu::DropIter    { pCmd } { catch { $pCmd -delete }; catch { rename $pCmd {} } }
+```
+
+NULL 判斷一律 `while { $lObj != $lNullObj }`,其中 `set lNullObj NULL` —— SWIG 的空指標在 Tcl 端就是字串 `NULL`。
+
+### 5.7 用到的常數
+
+| 常數 | 用在哪 |
+|---|---|
+| `$::IterDefs_SCHEMATICS` | `NewViewsIter` |
+| `$::IterDefs_ALL` | `DboPageNetsIter`、`NewOffPageConnectorsIter` |
+| `$::DboBaseObject_PLACED_INSTANCE` | 濾掉階層方塊(`DRAWN_INSTANCE`) |
+| `$::DboBaseObject_WIRE_BUS` / `_WIRE_BUNDLE` | 認 bus |
+| `$::DboValue_NOROTATION` | 畫線/畫框的 rotation 參數 |
+| `$::DboValue_HOLLOW_FILL` | 框不填色(填了會蓋住要指的元件) |
+| `$::DboValue_COLOR7` / `_COLOR9` | 粉紅線 / 青綠框 |
+| `$::DboValue_WIDE_WIDTH` | 線寬 |
+| `$::DboValue_SOLID_LINE` / `_DASH_LINE` / `_DOT_LINE` / `_DASH_DOT_LINE` / `_DASH_DOT_DOT_LINE` | 線型,marker 用 DASH_DOT |
+
+`DboEnum` L3843 統一解析:`$::DboValue_*` 查不到就丟看得懂的錯,不會把空字串灌進 Dbo 呼叫。
+
+> **沒有 RGB setter**。`SetColor` 吃的是 Capture 固定 48 色盤的 index(Capture.exe 表在 0xE33E40),粉紅和青綠都只能取最近的一色。
+
+### 5.8 非 DBO 的 Capture 應用層指令(一併記錄)
+
+| 指令 | Appendix A | 用途 |
+|---|---|---|
+| `Open <path>` | p.130 | 開設計;已開的只 activate 視窗 |
+| `SelectPMItem <name>` | p.130 | 還原 PM 選取項(項目 4) |
+| `GetSelectedPMItems` / `IsDocModified` / `GetActivePMDesign` / `GetActiveOpjName` | p.129-132 | `diagSaveState` 診斷 |
+| `ZoomRedraw` | — | 畫完 marker 重繪 |
+| `capDisplayMessageBox` | p.140-141 | 訊息框 |
+| `SetAppWindowAsParent` | p.134 | Tk 視窗掛在 Capture 底下 |
+| `capCloseChildViewsExceptCurrent` | p.136 | Close Page |
+| `svsDiffDesigns` | p.140 | 唯一官方比對入口,**吃整個 design 不吃 page** — 所以 page 級比對才要自己刻 |
+
+### 5.9 效能:哪些 DBO 呼叫是貴的
+
+`mTimeCompare`(預設 ON)量出來的實際數字:
+
+```
+timing: CollectPageParts 1843 ms - 312 part(s), 2971 pin(s)
+          rule4 part pin count      14 ms over  312 call(s)
+          rule4 pin position       431 ms over 1204 call(s), 1767 pin(s) skipped
+          the rest of the walk    1398 ms
+```
+
+三個已經做掉的最佳化:
+
+1. **net label 快取**(`lNetCache` array,key = SWIG 的物件 handle)。每個 pin、每個 GND 符號都問同一批 net,每答一次要走完該 net 的所有 wire。SWIG 用位址當 handle,所以同一個 `DboNet` 不管從 pin 還是從 nets iterator 來都是同一個 key。
+2. **先問 pin 數再決定要不要讀 pin 位置**。`GetOffsetHotSpot` 一次要三個 Dbo 呼叫(本身 + 兩個 CPoint getter),而 `mRule4MinPins`(5)以下的被動元件 rule4 根本不看 —— 上面那行 1767 pins skipped 就是省下來的。pin 數讀不到時當作大零件,寧可慢不可錯。
+3. **`DrawMarkersOnPage` 只做一次 `FindPage`**,整批 marker 共用。
+
+而 **最貴的通常不是 DBO 是 `puts`** —— 一頁上千行、每行一次 Command Window append。`mPinDetail 0` 砍掉最大一塊(每個 pin 一行),`mQuiet 1` 全砍。
+
+### 5.10 只在 DLL 查到、Appendix A 沒有的呼叫(清單)
+
+這幾支沒有任何原廠 script 呼叫,是直接對 `tools\bin\orDb_Dll_Tcl64.dll` 的 SWIG wrapper 比對出來的 —— 參數名就是它 `Wrong # args` 訊息印的那些:
+
+```
+DboPortInst_GetPinNumber     self number      number 是 CString&
+DboPortInst_GetIsNoConnect   self status      no-connect (X) 記號
+DboPortInst_GetNet           self status      page DboNet,沒有回 NULL
+DboPartInst_GetPinCount      self             兩種拼法都在 DLL 裡
+DboPartInst_sGetPinCount     self
+DboSchematic_Rename          self pObj newName
+DboDesign_RenameObject       self pObj newName
+DboPage_NewGraphicBoxInst    self status rect location rotation ?nId?
+DboDesign_MarkModified       self pOccurrence  ← 就是這支害 MarkModified 一直失敗
+```
+
+查法:`strings`/字串搜尋 DLL 找 `Dbo<Class>_<Method>`,SWIG 會把完整 signature 寫進錯誤訊息表。
+
+### 5.11 一句話速查
+
+| 我要… | 用哪組 |
+|---|---|
+| 拿到某個 .DSN 的所有頁 | `GetDesignPages` → session → `NewViewsIter` / `NewPagesIter` |
+| 拿到某一頁的物件 | `FindPage` / `FindPageObjs`(要改頁名就用後者) |
+| 這頁有哪些零件 | `NewPartInstsIter` + `GetObjectType` 濾 `PLACED_INSTANCE` |
+| 讀零件屬性 | `PropStr` → `GetEffectivePropStringValue` |
+| 這隻 pin 接到哪條 net | `NextPin` 回的 DboPortInst 直接 `GetNet` |
+| pin 的實體座標 | `GetOffsetHotSpot`(不是 `GetOffsetStartPoint`) |
+| net 叫什麼名字 | wire 的 `NewAliasesIter`,不是 net 自己 |
+| 這條線是不是 bus | `GetObjectType` 比 `WIRE_BUS` |
+| 在頁上畫線/畫框 | `NewGraphicLineInst` / `NewGraphicBoxInst` + `DboSet` 設顏色 |
+| 改頁名 | `DboSchematic Rename`,不是 `DboPage SetName`(沒有這支) |
+| 標記已修改 | `MarkObjModified`,三層 arity 不同 |
+
+---
+
+## 項目 6 — (待新增)
