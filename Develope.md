@@ -1115,4 +1115,711 @@ DboDesign_MarkModified       self pOccurrence  ← 就是這支害 MarkModified 
 
 ---
 
-## 項目 6 — (待新增)
+## 項目 6 — Schematic Check 兩項檢查:checkbox 對話框、net 名稱衝突、pink line、可複製報告
+
+**日期**:2026-09-07
+**狀態**:完成(`SCH_CHECK_ITEM2` 的判斷依據待真實 design 驗證,見 6.9)
+**變更檔案**:`capAutoLoad\mUtilMenu.tcl`(7922 行,192 個 proc)
+
+### 6.1 需求(依序,共 4 次交辦)
+
+| # | 交辦內容 | 結果 |
+|---|---|---|
+| 1 | Start 前先跳選單,兩個項次前面有 radio,Start / Close 兩個按鈕 | 已存在於工作目錄版本,只做驗證 |
+| 2 | radio 改成**兩個都預設打勾**,勾選時設 `SCH_CHECK_ITEM1` / `SCH_CHECK_ITEM2` = 1,否則 0;Page Nets 名稱多顯示整個 Schematic 內的名稱 | 6.2 / 6.3 |
+| 3 | `SCH_CHECK_ITEM1=1` 跑原本的 Grid 比對;`SCH_CHECK_ITEM2=1` 多檢查 nets 與 schematic net name 差一個 `_????` 流水號,列在 MessageBox | 6.2 |
+| 4 | `SCH_CHECK_ITEM2` 找到的 net,**所有線段也畫 pink line**;MessageBox 改成 text window 以便 Ctrl-C | 6.2 / 6.3 |
+
+> 需求 2 的「radio 兩個都要選有」在 Tk 是矛盾的 —— radiobutton 綁同一個變數,永遠只有一個被選中。所以改成 **checkbutton**,而且這也是對的:兩種缺陷不是互斥選項,一份設計可以同時有。
+
+### 6.2 新增的 proc(9 支)
+
+| proc | 行 | 做什麼 |
+|---|---|---|
+| `SchNetName {net}` | L1541 | page `DboNet` → **schematic 層的名字**。`GetSchematicNet` → `GetName`,拿不到回 `""` |
+| `SchNetNames {dsn sch page}` | L1560 | 診斷用:一頁所有 net 的 page label / `GetName` / `GetLocalNetName` / `IsGlobal` / `IsSchematicNetSharedWithOtherPages` 並排印出。**用來確認 6.9 那件事** |
+| `NetLabelWithSch {row}` | L3734 | net dump 的名稱欄:兩者不同才印 `+3.3VSB (+3.3VSB_9631)`,相同或空就印原名 |
+| `NetNameConflictSuffix {label schName}` | L6879 | 單一 net 的判斷:schematic name 是否 = page label + `_` + **純數字**。回 `_9631` 或 `""` |
+| `PageNameConflicts {dict}` | L6903 | 一頁的全部,回 `{pageLabel schematicName suffix}` 列,依 label 排序 |
+| `MarkNameConflicts {page dict conf}` | L6683 | 把上面找到的 net,**每一條 wire 都畫 pink line**。回畫了幾條 |
+| `ChkItemsNormalize` | L7389 | 把 `SCH_CHECK_ITEM1/2` 正規化成乾淨的 0 / 1 |
+| `ChkItemsSelected` | L7407 | 回傳被勾選的 mode 清單,依 `mChkModes` 順序(永遠 grid 在前) |
+| `RunSchematicCheckSelected` | L7460 | Start 的入口:取得勾選清單,**一次**丟給 `RunSchematicCheckOnSelection` |
+
+### 6.3 改過的既有 proc(8 支)
+
+| proc | 行 | 改了什麼 | 相容性 |
+|---|---|---|---|
+| `CollectPageNets` | L3679 | net row 加**第 4 個元素** = schematic net 名(呼叫 `SchNetName`) | 加在**尾端**:element 0/1/2 不動,`NetSig` / `NetsByName` / `GridNetGroup` / netlist rules 全部無感 |
+| `PrintNetRows` | L3749 | 名稱欄改用 `NetLabelWithSch`;欄寬取該頁最長者,**下限 28** | 沒有改名的頁面輸出逐字元與舊版相同;舊的 3 元素 row 照印 |
+| `ShowResultWindow` | L4307 | 新增 `pOnClose` 參數(Close / X / Escape 三者共用) | 預設值仍是 `CloseResultAndSelector`,Compare 完全不受影響 |
+| `MarkGridFindings` | L6527 | 未改。列在這裡是因為 `MarkNameConflicts` 刻意抄它的 pink 那一段 | — |
+| `CheckOnePage` | L6954 | 加 `pModes` 參數;回傳值從 7 個元素變 **9 個**(加 `conflicts` / `confDrawn`) | 只有 `RunSchematicCheck` 呼叫它 |
+| `RunSchematicCheck` | L7138 | 加 `pModes`;報告拆成 `NETs not on Grid:` 與 `Nets name may conflict:` 兩段;結尾改叫 `ShowResultWindow` | — |
+| `RunSchematicCheckMode` | L7429 | 從「一個 branch 一件事」改成薄包裝,轉呼叫 `RunSchematicCheckOnSelection [list $pMode]` | 仍可在 Command Window 單獨跑一項 |
+| `RunSchematicCheckOnSelection` | L7577 | 加 `pModes` 參數(預設 `{grid}`),PM 選取解析邏輯**一行未動** | 舊呼叫方式行為不變 |
+| `DoSchematicCheck` / `DoSchematicCheckStart` | L7491 / L7480 | radiobutton → checkbutton;Start 改走 `RunSchematicCheckSelected`;沒勾任何項時跳提示且**視窗不關** | — |
+
+### 6.4 新增 / 改動的變數
+
+| 變數 | 行 | 預設 | 用途 |
+|---|---|---|---|
+| `::SCH_CHECK_ITEM1` | L745 | `1` | **裸全域**,不在 namespace 底下。checkbutton 直接 `-variable ::SCH_CHECK_ITEM1`,打勾就是賦值 |
+| `::SCH_CHECK_ITEM2` | L746 | `1` | 同上 |
+| `mChkModes` | L737 | 見下 | 多了**第 3 欄** = 該列綁的全域變數名 |
+| `mNetShowSchName` | L487 | `1` | 0 = net dump 回到只印 page label |
+| `mChkMode` | — | **已移除** | 被上面兩個全域取代 |
+
+```tcl
+variable mChkModes [list \
+    [list grid      "NETs not on Grid, cause connection missing"              SCH_CHECK_ITEM1] \
+    [list globalref "NETs have no global reference, but net name is the same." SCH_CHECK_ITEM2] ]
+```
+
+沿用而未新增的:`mChkNetColor`(L661,`DboValue_COLOR6` = pink)、`mChkLineWidth`(L664)、`mChkLineStyle`(L665)、`mChkMark`(L673,0 就整個不畫)、`mGridListMax`(L562,報告列幾頁)、`mChkNetListMax`(L694,一頁列幾條 net)、`mResultWin`(L375,與 Compare 共用同一個視窗)。
+
+### 6.5 新用到的 DBO 呼叫 — 補項目 5.10 的清單
+
+```
+DboNet_GetSchematicNet          self            ← 注意:沒有 status 參數
+DboSchematicNet_GetName         self name       name 是 CString&
+DboSchematicNet_GetLocalNetName self name       改名前的名字(目前只有診斷用)
+DboSchematicNet_IsGlobal        self status
+DboSchematicNet_IsSchematicNetSharedWithOtherPages  self pPage
+```
+
+`DboNet_GetSchematicNet` 是全檔**唯一不吃 `DboState`** 的 getter,別跟著旁邊的寫法加參數。
+
+佐證:`capDRCFramework/tcl/capProcessDRC.tcl:255-258` 反方向走同一條邊(net occurrence → `DboSchematicNet` → `NewNetsIter` → page `DboNet`),確認兩個物件的關係如假設。
+
+> **page DboNet 和 schematic net 是兩個物件,名字可以不一樣。** 項目 5 的 5.3(4) 說「page 層的 DboNet 沒有自己的名字,名字在 wire alias 上」—— 那句仍然對,但只講了 page 這一層。整份 schematic 怎麼稱呼它是 `DboSchematicNet` 的事,而兩頁各畫一條 `+3.3VSB` 又沒有東西連起來時,Capture 會把其中一條改名成 `+3.3VSB_9631`。**這個差異本身就是 `SCH_CHECK_ITEM2` 要找的東西。**
+
+### 6.6 呼叫關係
+
+```
+DoSchematicCheck                     ← 選單 callback(三條路徑共用)
+  ChkItemsNormalize
+  toplevel + checkbutton × 2         → -variable ::SCH_CHECK_ITEM1 / 2
+  [Start] DoSchematicCheckStart
+            ChkItemsSelected         → 空的就跳提示,視窗不關
+            CloseSchematicCheck      ← 先關視窗再跑,否則會擋在報告前面
+            RunSchematicCheckSelected
+              RunSchematicCheckOnSelection {modes}
+                (PM 選取解析 — 未改)
+                RunSchematicCheck pairs scope loud {modes}
+                  foreach page:
+                    CheckOnePage sch page {modes}
+                      DumpPageInfoOn        全部 / 只要 nets  ← 見 6.7
+                      [globalref] PageNameConflicts → NetNameConflictSuffix
+                      [globalref] MarkNameConflicts  → DrawPageLineOn (pink)
+                      [grid]      Search_Missing_connection_onGrid
+                      [grid]      MarkGridFindings   → DrawPageLineOn / DrawPageBoxOn
+                      [grid]      StarPageObj        → 頁名加 '*'
+                  ShowResultWindow "Schematic Check" $txt CloseResultWindow
+```
+
+dump 那一側:
+
+```
+CollectPageNets → SchNetName → $net GetSchematicNet → GetName
+PrintNetRows    → NetLabelWithSch     →  "+3.3VSB (+3.3VSB_9631)"
+```
+
+### 6.7 四個設計決定
+
+**(1) 兩項都勾 = 走一次,不是走兩次**
+
+原本 `RunSchematicCheckSelected` 是逐項呼叫 `RunSchematicCheckMode`,兩項都勾就會讀兩次 PM 選取、走兩次全部頁面、跳兩個 MessageBox。改成把**勾選清單一路傳到 `CheckOnePage`**,一頁 dump 一次、問兩個問題、一份報告。
+
+name check 讀的 schematic net 名字本來就在 grid check 那份 dump 的 net row element 3 裡,所以兩項都勾時第二項檢查幾乎免費。
+
+反過來只勾 `SCH_CHECK_ITEM2` 時,`CheckOnePage` 只 dump `nets` 段且不動 `mPinPosAll` —— 省掉整個 pin walk,那是一頁裡最貴的部分。
+
+**(2) 判斷用 `string` 指令而不是 regexp**
+
+net 名稱是使用者文字,`+3.3VSB` 開頭就是 regexp metacharacter,bus member `D[0]` 全是中括號。用 regexp 組 pattern 需要的跳脫很容易錯得不明顯:
+
+```tcl
+set lPrefix "${pLabel}_"
+if { [string first $lPrefix $pSchName] != 0 } { return "" }
+set lTail [string range $pSchName [string length $lPrefix] end]
+if { $lTail eq "" || ![string is digit -strict $lTail] } { return "" }
+return "_$lTail"
+```
+
+**(3) `MarkNameConflicts` 不用 array 查表 — page label 不是唯一鍵**
+
+第一版用 `array set lWanted` 以 page label 當 key,測試抓到 bug:同一頁上可以有**兩條都叫 `+3.3VSB`** 的 net,分別被改名成 `_9631` 和 `_9632`。array 會把兩條併成一條,每行印出的 netlist 名稱都變成最後那一個。改成對每個 net row 重跑一次 `NetNameConflictSuffix`,兩條都畫、各自報自己的名字。
+
+**(4) `SCH_CHECK_ITEM2` 只畫 pink,不畫 grey / blue box,也不改頁名**
+
+near miss 是「兩個東西的關係」,要兩個顏色說明誰是誰;name conflict 是「一條 net 被偷偷改名」,只有一個東西可以指。另一頁的同名 net 是故事的另一半,但它不在這一頁上,畫不出來。
+
+頁名不加 `*`:那是 grid check 用來說「這頁有幾何要看」的旗標,而且報告本身已經列出頁名。
+
+### 6.8 驗證方式與結果
+
+沿用項目 2 的假造 DBO 手法,`tools\bin\tclsh.exe` / `wish.exe` 離線跑,不用開 Capture。
+
+| 測試 | 工具 | 結果 |
+|---|---|---|
+| 全檔 parse + 192 個 proc 載入 | tclsh | PARSE OK |
+| `NetNameConflictSuffix` 12 組邊界 | tclsh | 全對(見下) |
+| `MarkNameConflicts` 只畫該畫的 | tclsh + 假 `DrawPageLineOn` | 4 條線,GND / SDA 未被畫到 |
+| 報告文字(3 種 pModes 組合 + 全空) | tclsh + 假 `CheckOnePage` | 各段只由自己的檢查印出 |
+| checkbox ↔ 全域變數雙向連動 | wish | 打勾 / `set ::SCH_CHECK_ITEM2 0` 兩向都通 |
+| Start 分派、沒勾時不關視窗 | wish | `{grid globalref}` / `{grid}` / `{globalref}` |
+| text window 可選取、可複製 | wish | Ctrl-C / Copy / Select All 皆可,Copy 未選取時取整份 |
+| Compare 的 Close 行為未被改到 | wish | 仍是 `CloseResultAndSelector` |
+
+```
++3.3VSB  +3.3VSB_9631 -> _9631      D[0]  D[0]_1234 -> _1234
++3.3VSB  +3.3VSB      -> -          N*A   N*A_7     -> _7
++3.3VSB  VCC_CORE     -> -          GND   GND_0     -> _0
++3.3VSB  +3.3VSB_A    -> -          A_1   A_1_22    -> _22
++3.3VSB  +3.3VSB_     -> -          A     A_1_22    -> -
++3.3VSB  (空)         -> -          (空)  +3.3VSB_1 -> -
+```
+
+報告實際輸出(兩項都勾):
+
+```
+Schematic Check - Design W980_WS.DSN
+min_dis 0.5 grid
+
+NETs not on Grid:
+  SCH1 / PAGE1   -   2 pair(s), 6 marked
+      nets:  +3.3VSB, N44011769
+  ... 2 page(s) not listed - nothing found on them
+
+Nets name may conflict:
+  SCH1 / PAGE1   -   2 net name(s), 3 marked
+      Page name: +3.3VSB (+3.3VSB_9631)
+      Page name: VCC_CORE (VCC_CORE_9702)
+  SCH1 / PAGE2   -   1 net name(s), 1 marked
+      Page name: GND (GND_1024)
+
+3 page(s) checked in 0 ms:  2 pair(s), 6 object(s) drawn, 1 page(s) renamed '*'  3 net name(s) may conflict, 4 object(s) drawn
+```
+
+### 6.9 已知限制 / 待確認
+
+1. **`DboSchematicNet` 的 `GetName` 和 `GetLocalNetName` 哪一個帶 `_9631`?** 目前取 `GetName`(推斷是 `ResolveComputedNameConflict` 動過的那個)。**若是反的,整個 `SCH_CHECK_ITEM2` 會找不到任何東西**,pink line 也跟著沒有。在 Command Window 跑一行就能確認:
+
+   ```tcl
+   ::mUtilMenu::SchNetNames {G:/Project/.../board.dsn} SCHEMATIC1 PAGE1
+   ```
+
+   若反了,改 `SchNetName`(L1541)最後一行的 getter 即可。
+
+2. `SCH_CHECK_ITEM2` 只看**這一頁**。它報的是「Capture 已經把這條 net 改名了」,而不是去比對另一頁上那條同名 net 在哪 —— 後者要跨頁 index,目前沒做。
+
+3. 短提示框(「Nothing is selected in the Project Manager」「Please tick at least one check」)**仍是 `capDisplayMessageBox`**。那些是提問不是結果,沒有東西需要複製。
+
+4. 報告視窗與 Schematic Compare **共用 `mResultWin`**,每次重建。先跑 Check 再跑 Compare,前者的報告會被取代。
+
+5. `mNetShowSchName` 每個 net 多一次 `GetSchematicNet` + `GetName`。100 頁的設計上還沒量過,要關就設 0。
+
+### 6.10 對項目 3 行號的影響
+
+項目 3 的結構樹對應 2953 行 / 98 proc,項目 5 對應 5228 行 / 143 proc。本次之後是 **7922 行 / 192 proc** —— 兩節的行號都已失效,proc 名稱與階層關係仍然有效(項目 3 開頭那句「找位置以 proc 名稱為準」就是為這件事寫的)。
+
+本節 6.2 / 6.3 的行號是 7922 行版本的實測值。要重建結構樹時 `mUtilMenu-tree.md` 是另一份對照。
+
+---
+
+## 項目 7 — Nets 段混進 BUS:兩層過濾,與 Close Page 改成關掉全部頁面
+
+**日期**:2026-09-08
+**狀態**:完成(BUS 過濾已用真實 DDR 頁面驗證)
+**變更檔案**:`capAutoLoad\mUtilMenu.tcl`(8179 行,194 個 proc)
+
+### 7.1 症狀
+
+Nets 段裡出現大量重複的線段,而且那些線段其實是 BUS。使用者貼出的 `3.txt`(真實 DDR 頁面 dump)是決定性證據:
+
+```
+    V_M_BMC_DDR4_DQ0              wires: 18
+        wire (7.50,2.10)-(6.40,2.10)     ← 只有這一條是它自己的
+        wire (7.60,2.00)-(7.60,1.90)     ┐
+        wire (7.60,2.10)-(7.60,2.00)     │ 這 17 條在
+        ...                              │ DQ1 / DQ2 / ... 裡
+        wire (7.70,1.90)-(7.60,1.90)     ┘ 一模一樣地又出現一次
+    V_M_BMC_DDR4_DQ1              wires: 18
+        wire (7.50,2.20)-(6.40,2.20)
+        wire (7.60,2.00)-(7.60,1.90)     ← 同一段
+        ...
+```
+
+而 Buses 段列的正是同一批座標:
+
+```
+  Buses
+    (unnamed)                  BUS     (7.60,2.00)-(7.60,1.90)
+    (unnamed)                  BUS     (7.60,2.10)-(7.60,2.00)
+    ...
+```
+
+用 script 對 `3.txt` 第一頁做統計:
+
+| 項目 | 數字 |
+|---|---|
+| Nets 段的 wire 行數 | 835 |
+| 其中其實是 BUS 的 | **482(57%)** |
+| 被污染的 net | 57 條中的 30 條 |
+| `V_M_BMC_DDR4_DQ0` | 18 wires = **17 bus + 1 自己的** |
+| 同一段 bus 被幾條 net 列出 | **16 條** |
+| 假的 `two nets that did not merge` | **400 筆** |
+
+### 7.2 這不只是 dump 變長 — 它製造了 400 筆誤報
+
+`GridEndpoints`(L6408)把每個 net row 的 element 2 展成兩個 `NET` 端點,group 用 `GridNetGroup` 算(名字不同就是不同 group)。16 條 net 都宣稱同一個座標有端點,就是 16 個**不同 group 的 NET 點疊在同一點上**。
+
+而 `Search_Missing_connection_onGrid` 的零距離規則是:
+
+```tcl
+# 對 pin / symbol / bus end 距離 0 = 已經接上了,跳過
+# 對另一條 NET 距離 0 = 兩條 net 該合而未合,保留為 finding
+if { $lD == 0 && [lindex $lQ 0] ne "NET" } { incr lTouching ; continue }
+```
+
+兩邊都是 `NET`,所以每一對都被報成「two nets that did not merge」。那 400 筆全部是 bus 在做 bus 該做的事。
+
+> 這條規則本身沒錯 —— 兩條真的沒合併的 net 疊在一起確實是要報的。錯的是 bus 的線根本不該以 `NET` 的身分出現在那裡。
+
+### 7.3 兩層過濾,而且第二層才是重點
+
+**第一次改錯了層級。** 先加的是 net 層的 `IsBusNet`,想法是「bus 也是一條 net,`DboPageNetsIter` 用 `IterDefs_ALL` 會把它一起吐出來」。這件事是真的,但它只拿掉 bus **自己那一列**,對上面的症狀毫無幫助。
+
+真正的原因是:**`V_M_BMC_DDR4_DQ0` 是 bus MEMBER,不是 bus。** 它是一條合法的 scalar net,`IsBusNet` 正確地留下它 —— 但 `DboNet::NewWiresIter` 對一個 member 回傳的清單裡,**包含它所行經的那條 bus 的所有 wire**。DQ1、DQ2…… 每一條都一樣。
+
+所以要兩層:
+
+| proc | 行 | 擋掉什麼 | 效果 |
+|---|---|---|---|
+| `IsBusNet {net}` | L3765 | bus 自己的 net 物件(`NET_BUS` / `NET_BUNDLE`) | 少一列 |
+| `IsBusWire {wire}` | L3802 | bus 的 wire 出現在 member 的 wire 清單裡(`WIRE_BUS` / `WIRE_BUNDLE`) | **少 482 行、少 400 筆誤報** |
+
+`IsBusWire` 和 `CollectPageBuses`(L3680)用來**找** bus 的測試完全互補 —— 這個說是 bus 的 wire,正是那一段已經在印的。
+
+### 7.4 `NetLabelOf` 也要套同一條規則
+
+不是可選的。bus wire 帶著 bus 的 alias,而 `NetLabel` 是把所有 alias 用 ` = ` 串起來的:
+
+```
+mNetSkipBuses = 0  →  D[0..15] = V_M_BMC_DDR4_DQ0    wires: 18
+mNetSkipBuses = 1  →  V_M_BMC_DDR4_DQ0               wires: 1
+```
+
+`CollectPageNets` 在**收 alias 之前**跳過 bus wire,所以 member 不會被冠上 bus 的名字。但 `NetLabelOf`(L1553)是另一條拿名字的路 —— pin 和 symbol 的連線標籤走它 —— 若不同步過濾,pin 那行會報 `net: D[0..15] = V_M_BMC_DDR4_DQ0`,跟 Nets 段的 `V_M_BMC_DDR4_DQ0` 對不起來。
+
+檔案裡 `NetLabelOf` 的註解明文承諾它給「`CollectPageNets` 放進 element 0 的同一個答案」,所以兩邊必須是同一條規則。
+
+### 7.5 為什麼不用 `IterDefs_SCALARS`
+
+`DboPageNetsIter` 的第二個參數是過濾器(`new_DboPageNetsIter source mode`),`IterDefs_SCALARS` / `IterDefs_BUSES` / `IterDefs_BUNDLES` 成套存在,理論上一個參數就能跳過 bus net 而不必走訪。
+
+原廠確實這樣用過 —— `capISCFExport/tcl/capDesignPhysicalViewReader.tcl:1071`:
+
+```tcl
+DboPageNetsIter busIter $lOwner $::IterDefs_BUSES
+set lNet [busIter NextNet $lStatus]
+set lBusNet [DboNetToDboNetBus $lNet]      ← 取回來直接 cast,不必再檢查型別
+```
+
+**但沒有採用**,三個理由:
+
+1. `IterDefs_SCALARS` 在全部原廠 script 裡**一個呼叫點都沒有**,只在 DLL 的常數表裡。它到底選什麼是未驗證的,語意稍有不同就會靜靜地**丟掉 net**。
+2. 它只能解決 net 層,對 7.3 的 member-wire 問題完全無效 —— 而那才是 482 行的來源。
+3. 型別判斷每條 net / 每條 wire 多一次 `GetObjectType`,成本可忽略。
+
+### 7.6 fail-safe:讀不到就保留
+
+`IsBusNet` 和 `IsBusWire` 都是這個形狀:
+
+```tcl
+if { [catch { set lOT [$pObj GetObjectType] }] || $lOT eq "" } { return 0 }
+foreach lVar { ::DboBaseObject_WIRE_BUS ::DboBaseObject_WIRE_BUNDLE } {
+    if { [info exists $lVar] && $lOT eq [set $lVar] } { return 1 }
+}
+return 0
+```
+
+`GetObjectType` 拋錯、或常數根本不存在 → 一律回 0 = **保留**。
+
+> bus wire 多印是外觀雜訊;signal wire 被丟掉是**沒有人會被告知的漏接**。一個讀不到的常數絕不能造成後者。
+
+同樣理由,跳過的數量會印出來,而且只在真的跳過時印:
+
+```
+    (1 bus/bundle net(s) and 272 bus wire(s) carried by member nets not listed here - see the Buses section)
+```
+
+一個會默默丟掉資料的區段,跟一張本來就沒有 bus 的頁面是分不出來的。
+
+### 7.7 開關與影響範圍
+
+`mNetSkipBuses`(L521,預設 1)。設 0 回到舊行為,兩層過濾一起關。
+
+**這改的是 net row 本身**,不像 `mNetShowSchName`(L490)只改顯示。所有讀 net row 的東西都會看到差異:Compare 的 Nets 簽章差異比對、`NetsByName`、netlist rules、Schematic Check 兩項檢查。
+
+這正是目的 —— bus 本來就不該被它們當成訊號來推理。但實務上:**同一份設計改前改後跑 Compare,Nets 段會出現一批「Remove」**,那是 bus 從清單裡消失,不是設計變了。第一次跑完就穩定。
+
+bus MEMBER 本身不受影響:`D[0]` 是隸屬於 bus 的 scalar net,不是 bus。它失去的只有 bus 的線,保留自己那一段 —— 從 pin 拉到 bus 的那條,也就是近距離檢查唯一該看的部分。
+
+### 7.8 驗證
+
+離線假造 DBO,照 `3.txt` 的實際拓樸重建(1 條 bus 17 wire + 16 個 member 各 1 條自己的 wire + 1 條一般 net):
+
+```
+mNetSkipBuses = 0
+    D[0..15]                     wires: 17
+    D[0..15] = V_M_BMC_DDR4_DQ0  wires: 18      ← 名字也被污染
+    D[0..15] = V_M_BMC_DDR4_DQ1  wires: 18
+    ... 18 row(s), 306 wire line(s)
+    被多條 net 宣稱的座標: 18   (最糟: 一個點上 17 條 net)   ← 誤報來源
+
+mNetSkipBuses = 1
+    (1 bus/bundle net(s) and 272 bus wire(s) ... not listed here)
+    V_M_BMC_DDR4_DQ0             wires: 1
+    V_M_BMC_DDR4_DQ1             wires: 1
+    ... 17 row(s), 17 wire line(s)
+    被多條 net 宣稱的座標: 0   (最糟: 0)
+```
+
+306 → 17 行,重疊座標 18 → 0。
+
+`IsBusWire` 的邊界:scalar → 0、bus → 1、bundle → 1、其他型別 → 0、`GetObjectType` 拋錯 → 0、常數不存在 → 0。
+
+**真實設計確認**(使用者回報):
+
+```
+    V_M_BMC_DDR4_MA0              wires: 2
+        wire (4.90,3.60)-(2.50,3.60)
+        wire (14.60,3.00)-(16.90,3.00)
+```
+
+只剩兩段自己的線 —— 兩端各一條從 pin 拉到 bus 的引線,bus 本體不見了。
+
+### 7.9 順帶調查:Bus Entry(沒有改任何東西)
+
+追查過程中先懷疑過 bus entry,結論是**不可能是它**,但查到的東西值得記下來 —— 現在四個 collector 確實漏掉 bus entry,將來要補就是照這份。
+
+`DboBusEntry`,object type 常數是 **`DboBaseObject_ENTRY`**(不叫 `..._BUS_ENTRY`)。
+
+**它不是 wire。** bus 抓得到是因為 bus 是一條 wire(`CollectPageBuses` 走 `NewWiresIter` 再濾型別);bus entry 是掛在 page 底下的獨立物件,wires iterator 永遠不會吐出它。所以它是**結構上**被漏掉,不是條件寫錯。
+
+兩個端點,但不對稱,也不叫 Start/End:
+
+| 呼叫 | 意義 |
+|---|---|
+| `GetEntryPoint {status}` | **落在 bus 上**的那一端 |
+| `GetEndPoint {status}` | 自由端,scalar net 接在這裡 |
+| `GetEntryWire {status}` | 那條 bus 的 `DboWire` |
+| `GetEndWire {status}` | 自由端接的 `DboWire`,沒接回 NULL |
+
+原廠佐證:`cdnTclEncrypted/orPrmDboStreamer.tcl:1012` `streamBusEntry` 只讀前兩個,並用 y 值比大小判斷斜線往左倒還是往右倒(`busEntryL` / `busEntryR`)。
+
+`GetEntryWire` / `GetEndWire` 這一對比座標好用得多 —— 不必用容差去猜哪條線碰到哪根 entry,物件本身就記著。
+
+其餘:`GetColor {status}`、`GetBoundingBox`(**無 status**)、`IsBus {status}`、`IsBundle {status}`、`GetId {status}`、`GetOwner`(→ DboPage)。**沒有 `GetName`**,bus entry 是匿名的。
+
+三個 iterator,都是方法型(不是 SWIG constructor,不必自己編唯一命令名):
+
+```
+$page NewBusEntriesIter {status} → NextBusEntry    delete_DboPageBusEntriesIter
+$wire NewBusEntriesIter {status} → NextBusEntry    delete_DboWireBusEntriesIter
+$net  NewBusEntriesIter {status} → NextBusEntry    delete_DboNetBusEntriesIter
+```
+
+原廠呼叫點:`capDRCFramework/tcl/capProcessDRC.tcl:114-125`、`capPDFExport/tcl/capPdfUtil.tcl:463-470`(page 版),`orPrmDboStreamer.tcl:1030-1046`(wire 版)。
+
+DboPage 另有 `GetBusEntryCount {status}`、`GetBusEntry {location status}`(座標 hit-test)、`NewBusEntry`、`DeleteBusEntry`、`ConnectWireToBusEntryAtPoint`、`DisconnectWireFromBusEntry`。
+
+### 7.10 順帶修改:Close Page 改成關掉全部頁面
+
+原本是 `capCloseChildViewsExceptCurrent()`(PDF p.136)=「Close All Tabs But This」,最上面那頁會留著。需求是把所有開啟的 .DSN / .OPJ 的每一頁都關掉。
+
+Appendix A **p.141** 就有:
+
+```
+capCloseChildViews(pExclude = None)     pExclude: CDocument *
+capCloseChildViews()
+```
+
+無參數版是真的可用 —— Cadence 自己的 `capAutoLoad/capCloseAllChildWindows.tcl:8` 就是把它註冊成 `OnCloseChildWindows`(Window > Close All)的 handler。
+
+**但預設沒有直接用無參數版。** Project Manager 本身就是 Capture 主框架的一個 MDI child,「關掉所有 child view」很可能連專案樹一起關掉 —— 而關掉 Project Manager 等於關掉專案,那不該是「關頁面」能順手做到的事。
+
+所以預設走 `capCloseChildViews [GetActivePM]`。`GetActivePM()`(p.130)回傳 `COrCapturePMDoc`,正好是 `pExclude` 要的東西。**兩種情況都安全**:如果 PM 本來就不在關閉範圍內,這個參數只是指名一個反正不會被關的 document,行為不變。
+
+`mClosePageMode`(L801):
+
+| mode | 行為 | 指令 |
+|---|---|---|
+| `allbutpm`(預設) | 每一頁都關,PM 留著 | `capCloseChildViews [GetActivePM]` |
+| `all` | Window > Close All,連 PM | `capCloseChildViews` |
+| `exceptcurrent` | 改之前的行為 | `capCloseChildViewsExceptCurrent` |
+
+失敗時**刻意不往無參數版掉** —— 「exclude 沒生效」不是可以做出比要求更具破壞性的事的理由,所以退回舊行為(最壞留一頁沒關)。離線測過六種情況,含 `GetActivePM` 取不到、`pExclude` 被 wrapper 拒絕、mode 打錯字。
+
+**已知限制**:`GetActivePM()` 只回傳作用中的專案。同時開兩個專案時,非作用中那個的 Project Manager 不在排除範圍內。Appendix A 沒有可以列舉所有開啟中 PM document 的指令,所以沒東西可以擴大排除範圍 —— 真的會遇到就改用 `exceptcurrent`。
+
+`diag` 的指令探測清單順帶加了 `EnableAllWindowCloseMenu`(p.136)和 `GetActivePM`。
+
+### 7.11 本次新增 / 改動總表
+
+| 項目 | 行 | 類型 |
+|---|---|---|
+| `IsBusNet {net}` | L3765 | 新增 |
+| `IsBusWire {wire}` | L3802 | 新增 |
+| `CollectPageNets` | L3832 | net 層 + wire 層兩處跳過,跳過數量會印出 |
+| `NetLabelOf` | L1553 | 同一條 wire 跳過規則 |
+| `DoClosePage` | L5898 | 三種 mode + fallback |
+| `mNetSkipBuses` | L521 | 新變數,預設 1 |
+| `mClosePageMode` | L801 | 新變數,預設 `allbutpm` |
+| `diag` 指令清單 | — | 加 `EnableAllWindowCloseMenu` / `GetActivePM` |
+
+### 7.12 對前面各節行號的影響
+
+項目 3 對應 2953 行 / 98 proc,項目 5 對應 5228 行 / 143 proc,項目 6 對應 7922 行 / 192 proc。本次之後是 **8179 行 / 194 proc**。
+
+行號一律以 proc 名稱為準去找,本節的行號是 8179 行版本的實測值。
+
+---
+
+## 項目 8 — Close Page 關掉所有專案的所有頁面:四次失敗與最後成功的原因
+
+**日期**:2026-09-09
+**狀態**:完成(實測成功)
+**變更檔案**:`capAutoLoad\mUtilMenu.tcl`(9128 行,208 個 proc)
+
+### 8.1 需求
+
+`mUtil > Close Page` 原本是 `capCloseChildViewsExceptCurrent()` —— tab RMB 的「Close All Tabs But This」,最上面那頁會留著。要改成:**PROJECT_MANAGER_VIEW 裡所有開著的 .DSN / .OPJ,一個一個把已打開的 Page 全部 Close**。
+
+### 8.2 一句話結論
+
+**失敗的四次都不是因為找不到指令,而是因為「呼叫成功」被當成了「事情做完」。**
+
+最後成功靠兩件事,缺一不可:
+
+1. 不要用 `capCloseChildViews` 的**單參數**形式 —— 它不會報錯,它會成功並且**什麼都不關**
+2. 每一輪都要**量有沒有真的關掉東西**,而且不能用 `EnableAllWindowCloseMenu` 來量
+
+### 8.3 四次失敗的完整過程
+
+這一節值得完整保留,因為每一次的 log 都排除掉一個假設,而最後的解法是這四次逼出來的。
+
+**第 1 次:`capCloseChildViews [GetActivePM]`**
+
+想法:Appendix A p.141 有 `capCloseChildViews(pExclude = None)`,`pExclude: CDocument *`;`GetActivePM()`(p.130)回 `COrCapturePMDoc`,拿它當排除對象就能「關掉所有頁面、保留 Project Manager」。
+
+實測 log:
+
+```
+mUtil:   capCloseChildViews $pm failed -> No matching function for overloaded 'capCloseChildViews'
+mUtil:   falling back to capCloseChildViewsExceptCurrent (one page will stay open)
+    2/3  X870 ISSUE.DSN - pages closed (one may remain - see the trace)
+  (0 of 3 design(s) closed cleanly)
+```
+
+**這是 SWIG 在說型別不對,不是指令不存在。** 去 `Capture.exe` 挖:
+
+```
+in method 'capCloseChildViews', argument 1 of type 'CDocument *'
+```
+
+而 `Capture.exe` 註冊的是**三個彼此獨立的 SWIG 型別**:`_p_CDocument`、`_p_COrCapturePMDoc`、`_p_COrSchematicDoc`,**之間沒有註冊任何轉換**。所以 `COrCapturePMDoc` 永遠不可能是那個參數 —— 指標是對的,掛在上面的型別標籤不是。
+
+三個專案全部掉進 `capCloseChildViewsExceptCurrent`,那就是「每個各留一頁」的來源。
+
+**第 2 次:改用回傳 `CDocument` 的 getter**
+
+挖 `Capture.exe` 又找到幾支 Appendix A 沒收錄的:
+
+```
+capGetActivePMDoc              無參數
+capGetActiveDocument           無參數    (p.136 有)
+capGetActiveDocumentPathName   無參數
+capGetActiveDocumentTitle      無參數
+capGetPMDocList                無參數
+capCloseAllTabs  pDoc pMode    ← CDocument *
+capCloseDocument pDoc          ← CDocument *
+capClosePM       pDMDoc        ← COrCapturePMDoc *
+```
+
+以為 `capGetActivePMDoc` 會回 `CDocument`。加了 `DumpCloseApi`(L6637)去問,實測:
+
+```
+capGetActiveDocument          _c01b5536..._p_COrCapturePMDoc
+capGetActivePMDoc             _e0395536..._p_COrCapturePMDoc
+capGetActiveView              _c00b9a56..._p_CView
+capGetActiveWindow            _10b06f9a..._p_CWnd
+capGetActiveDocumentPathName  (空)
+capGetActiveDocumentTitle     W980_WS : P05. SA PHASE 1-2 80A*a1
+GetActivePM                   _e0395536..._p_COrCapturePMDoc
+```
+
+三個決定性的事實:
+
+- **兩個 getter 都回 `COrCapturePMDoc`**。`capGetActivePMDoc` 跟 `GetActivePM` 是**同一個指標**(`_e0395536`)。**Tcl 這一側沒有任何東西能產出 `_p_CDocument`**,所以單參數形式從 Tcl 根本無法正確呼叫。
+- **active DOCUMENT 是專案,active VIEW 是頁面**。title 是 `W980_WS : P05...`(一張頁面),而 `capGetActiveView` 是獨立的 `CView`。所以 Capture 是**每個專案一個 `COrCapturePMDoc`,每張頁面是它的一個 view**。
+- 因此 **exclude 這條路即使能編譯也是錯的**:「關掉除了這個 document 以外的所有 child view」套在專案自己的 document 上,**一頁都不會關**,因為那些頁面正是它的 view。
+
+**第 3 次:改用無參數版 + 事後重開**
+
+無參數 `capCloseChildViews` 是 Cadence 自己 `capAutoLoad/capCloseAllChildWindows.tcl:8` 註冊成 Window > Close All 的那支。Project Manager 用反方向保護:跑完把每個專案再 `Open` 一次(`mClosePageReopen`)。
+
+還是沒全關。使用者:「似乎只各關一頁」。
+
+**第 4 次:重複關到關完**
+
+判斷「一次呼叫關不完」,於是用 `EnableAllWindowCloseMenu()`(p.136,原廠綁在 `OnUpdateCloseChildWindows` 的那支)當迴圈條件,關到它說沒東西為止。實測 log:
+
+```
+mUtil:   stopped after 200 round(s) - something is still reported as open
+    1/3  W890D8-2L2T.DSN - 200 round(s), pages MAY REMAIN (exclude)
+    2/3  W980_WS_R100_20260903_GBO.DSN - 200 round(s), pages MAY REMAIN (exclude)
+    3/3  X870 ISSUE.DSN - 200 round(s), pages MAY REMAIN (exclude)
+  (0 of 3 design(s) closed cleanly; EnableAllWindowCloseMenu now 1)
+```
+
+**`(exclude)` 才是關鍵字。** route 印的是 `exclude`,代表 `capCloseChildViews $doc` 這次**沒有拋錯,它成功了** —— 然後一個視窗都沒關。三個專案各空轉 200 輪。
+
+第 2 次已經把「exclude 即使能呼叫也不會關任何東西」寫進註解了,然後還是把它排在第一個試。**它一「成功」就 return,能用的路線永遠到不了** —— 無參數版從頭到尾一次都沒被呼叫過。
+
+### 8.4 成功的原因 — 兩個修正
+
+**(1) `exclude` 從預設路線拿掉**
+
+`mClosePageRoutes`(L884)= `{all exceptcurrent}`:
+
+| route | 指令 | 為什麼在這個位置 |
+|---|---|---|
+| `all` | `capCloseChildViews`(無參數) | **第一個**,因為只有它能靠自己清空一個專案 |
+| `exceptcurrent` | `capCloseChildViewsExceptCurrent` | 已知有效(第 1 次就是它在關),但**永遠到不了 0** —— 最後剩的那一頁就是 current。當備援,不是答案 |
+
+`exclude` 刻意不在預設清單裡。它**不是會失敗,是會成功而且什麼都不做**。要加回去只能放最後。
+
+**(2) 偵測「什麼都沒發生」 — 而且不能用 `EnableAllWindowCloseMenu` 來偵測**
+
+這是真正的教訓。**`EnableAllWindowCloseMenu` 是布林值** —— 它說「還有東西開著」,不說還有幾個。所以它分不出「一次關一頁」和「完全沒動」,這正是空轉 200 輪的原因:每一輪問它都回 1,迴圈就以為還有得關。
+
+改用 **`capGetActiveDocumentTitle` 當進度指標**(`CloseProgressToken`,L6494)。它在實機讀出來是 `W980_WS : P05. SA PHASE 1-2 80A*a1` —— 設計名加頁面名。**關掉一個視窗一定會換 active view,標題就會變;標題沒變＝什麼都沒關。**
+
+連續 `mClosePageStallRounds`(L890,預設 2)輪標題沒動,就放棄這條路線換下一條,不再死磕。
+
+`AnythingLeftToClose`(L6509)仍然用,但只負責「結束」這一件事,而且回三態:`1` 還有、`0` 沒了、`-1` 問不到 —— **`-1` 不等於 `0`,不能當成關完了**。
+
+### 8.5 逐專案的迴圈
+
+`ClosePagesPerDesign`(L6680):
+
+```
+作用中那個先關(不加 Open)
+  → ClosePagesUntilDone
+下一個 Open 起來 → ClosePagesUntilDone
+  ...
+全部重開(mClosePageReopen)
+原本作用中的最後 Open,所以它回到最前面
+```
+
+**作用中那個不加 `Open`** 有實質理由:它的頁面就是現在螢幕上那些。不管 `capCloseChildViewsExceptCurrent` 的「current」是什麼意思,它指的就是它們 —— 那一輪是唯一不可能弄錯的。對已經作用中的專案呼叫 `Open` 只有副作用風險,沒有好處。
+
+專案清單來自 `SessionDesigns`(L5491),走 `DboSession::NewDesignsIter` —— 見 8.7。
+
+### 8.6 誠實回報
+
+過程中改掉一個自己的回報錯誤:撞到上限的專案原本還被算進「closed cleanly」。`ClosePagesUntilDone`(L6554)現在回 `{rounds route done}`,**只有 Capture 本人說「沒東西了」才算 `done`**:
+
+```
+Capture 說沒東西了     -> closed in N round(s) (all)
+所有路線都停滯         -> N round(s), pages MAY REMAIN,並列出試過哪些
+enabler 不肯回答       -> 每條路線只做一輪,明說可能有殘留
+撞到 mClosePageMaxRounds -> 停下並說明
+```
+
+最後一行的 `EnableAllWindowCloseMenu now 0/1` 是**跑完之後由 Capture 給的最終答案**,不是這個迴圈自己的記帳。
+
+每一行還印 `GetActiveOpjName`,可以從外部確認迴圈真的在切換專案。
+
+### 8.7 副產品:列舉所有開啟的 design
+
+`SessionDesigns`(L5491)/ `DumpSessionDesigns`(L5521),走 `DboSession::NewDesignsIter`:
+
+```
+DboSession_NewDesignsIter        self status   -> DboSessionDesignsIter
+DboSessionDesignsIter_NextDesign self status   -> DboDesign
+delete_DboSessionDesignsIter
+```
+
+兩支原廠 script 的同一寫法:`capDemoBrowser/tcl/OrHandlerCapDemoBrowser.tcl:288`(proc 就叫 `GetOpenDesigns`)、`capFindAndReplace/tcl/capDesignUtil.tcl:961`。
+
+這推翻了項目 7.10 寫的「Appendix A 沒有辦法列舉」—— 對 **PM document** 仍然成立,但 **design** 是列得出來的。
+
+**刻意避開原廠的一個坑**:`capDesignUtil.tcl:965` 寫
+
+```tcl
+set lStatus [$lDesign GetName $lName]     ← 把驅動 iterator 的 DboState 蓋掉了
+```
+
+用 `CStr` helper 就不會有這問題。
+
+**.OPJ 仍然列不出來**。它不是 DBO 物件,資料庫層看不到。Appendix A 只有 `GetActiveOpjName()`(p.129,只有作用中那一個)和 `CloseProject()`。原廠 `capDemoBrowser` 的做法是把 `.DSN` 字串替換成 `.OPJ` —— 對多數專案成立,但不保證。`DumpSessionDesigns` 把猜測和 `GetActiveOpjName()` 並排印出來以便核對。
+
+專案的頁面就是它 design 的頁面,所以走 design 就涵蓋了專案;唯一沒涵蓋的是「開著 .OPJ 但沒載入 design」,那本來就沒有頁面可關。
+
+### 8.8 四種 mode
+
+`mClosePageMode`(L834,預設 `perdesign`):
+
+| mode | 行為 |
+|---|---|
+| `perdesign` | **預設**。所有開啟的 design 逐一關,每個都關到 Capture 說沒東西為止 |
+| `allbutpm` | 只處理作用中的專案,一輪 |
+| `all` | `capCloseChildViews` 無參數,一次 |
+| `exceptcurrent` | 最原始的行為 |
+
+打錯字落到 `perdesign`。
+
+**Appendix A 沒有逐「頁」關的指令** —— 只有三支整個 frame 層級的(`capCloseChildViews` 兩種形式、`capCloseChildViewsExceptCurrent`)。所以「一個一個」實作成**逐 design**,那是這個 API 能到的最細粒度。
+
+### 8.9 教訓
+
+三條,都是這次才學到的:
+
+1. **SWIG 的「No matching function」是型別錯誤,不是指令不存在。** 遇到它要去 exe/dll 找 `in method 'X', argument N of type 'T'`,再確認 Tcl 這側有沒有東西產得出 `T`。這次答案是「產不出來」,而那才是該停下的點。
+2. **呼叫成功 ≠ 事情做完。** `capCloseChildViews $doc` 回傳正常、無例外、關了零個視窗。任何會「動作」的 API 都要有獨立的完成度量,不能用回傳值代替。
+3. **布林狀態不能當進度指標。** `EnableAllWindowCloseMenu` 只回「還有沒有」,拿它當迴圈條件會把 no-op 迴圈跑到上限。要用會隨每次動作改變的東西 —— 這裡是 `capGetActiveDocumentTitle`。
+
+### 8.10 待觀察
+
+第 4 次的 log 有一個小異常還沒解:第 3 個專案 `X870 ISSUE.DSN` 那行印的 `opj` 是 `W980_WS_R100_20260903_GBO.opj`,跟前一個相同 —— 表示 `Open` 當時沒有成功切換到 X870,`GetActiveOpjName` 還停在上一個專案。
+
+成功那次沒有再出現這個現象(否則第 3 個專案不會關乾淨)。若日後又看到同一行的 `opj:` 重複,就要懷疑 `Open` 對「已在 session 中的 design」不是可靠的啟動方式,候選替代是 `capFindActivateWindow(objType)`(p.129)。
+
+### 8.11 新增 / 改動總表
+
+| 項目 | 行 | 類型 |
+|---|---|---|
+| `SessionDesigns` | L5491 | 新增 |
+| `DumpSessionDesigns` | L5521 | 新增 |
+| `ClosePagesVia {route}` | L6454 | 新增 |
+| `CloseProgressToken` | L6494 | 新增 ★ 成功的關鍵 |
+| `AnythingLeftToClose` | L6509 | 新增(三態) |
+| `ClosePagesUntilDone` | L6554 | 新增 ★ 路線升級 + 停滯偵測 |
+| `ClosePagesKeepingPM` | L6624 | 保留給 allbutpm |
+| `DumpCloseApi` | L6637 | 新增(診斷) |
+| `ClosePagesPerDesign` | L6680 | 新增 |
+| `DoClosePage` | L6803 | 四種 mode |
+| `mClosePageMode` | L834 | 新變數,預設 `perdesign` |
+| `mClosePageDocGetters` | L844 | 新變數 |
+| `mClosePageReopen` | L854 | 新變數,預設 1 |
+| `mClosePageMaxRounds` | L865 | 新變數,預設 200 |
+| `mClosePageRoutes` | L884 | 新變數,`{all exceptcurrent}` |
+| `mClosePageStallRounds` | L890 | 新變數,預設 2 |
+
+### 8.12 行號
+
+項目 3 = 2953 行 / 98 proc,項目 5 = 5228 / 143,項目 6 = 7922 / 192,項目 7 = 8179 / 194。本次之後是 **9128 行 / 208 proc**。行號一律以 proc 名稱為準去找。

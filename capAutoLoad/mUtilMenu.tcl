@@ -1,6 +1,26 @@
 #/////////////////////////////////////////////////////////////////////////////////
 #  TCL file: mUtilMenu.tcl
 #
+#  mUtil - OrCAD Capture 17.4 schematic utilities
+#
+#  Version   1.00
+#  Author    LEO
+#  Company   ASROCK
+#
+#  Not a Cadence file.  Installing a Capture hotfix deletes everything under
+#  capAutoLoad that the installer does not know about, this file included, so
+#  keep a copy outside the tools tree and put it back after an upgrade.
+#
+#  The three fields above are also namespace variables - mVersion, mAuthor,
+#  mCompany - so they can be read at run time:
+#
+#      puts [::mUtilMenu::About]        ->  mUtil 1.00 - LEO, ASROCK
+#
+#  mVersion is the only one of the three that anything prints on its own: it goes
+#  on the banner line of every report (see VerStr and Banner).  The author and
+#  company are carried, not announced - nothing in normal operation shows them,
+#  and About / diag are where to look.
+#
 #  Adds a top-level "mUtil" menu, plus the SAME two commands under
 #  Accessories > mUtil, so the two menu mechanisms can be compared:
 #
@@ -10,9 +30,37 @@
 #
 #  Items:
 #     Schematic Compare -> Tk dialog: two .DSN fields + Browse, Execute/Cancel
-#     Schematic Check   -> message box naming the Design (.DSN) or Project (.OPJ)
-#                          currently selected in PROJECT_MANAGER_VIEW
-#     Close Page        -> tab RMB > Close All Tabs But This
+#     Schematic Check   -> Tk dialog: one CHECKBOX per check, both ticked by
+#                          default, Start / Close.  Start runs every ticked check
+#                          over whatever PROJECT_MANAGER_VIEW has selected (a
+#                          page, a schematic, the .DSN or the .OPJ); Close does
+#                          nothing.  Each box IS a global variable, so the state
+#                          is readable and settable from the Command Window:
+#                            SCH_CHECK_ITEM1  NETs not on Grid, cause connection
+#                              missing - near misses found, marked on the page
+#                              with a pink/grey line and a blue box.  A schematic
+#                              / .DSN / .OPJ run also renames each marked page
+#                              '*' and prints "... has finished" per page; ONE
+#                              selected page does neither - nothing to find your
+#                              way back to, and no wait to report on.
+#                            SCH_CHECK_ITEM2  NETs have no global reference, but
+#                              net name is the same - every net whose schematic
+#                              name is the page label plus a serial number
+#                              (+3.3VSB drawn, +3.3VSB_9631 in the netlist),
+#                              listed under "Nets name may conflict:" and marked
+#                              on the page with a pink line over every one of its
+#                              wires.  The page is NOT renamed '*'.
+#                          1 = ticked, 0 = not.  Both ticked is ONE pass over the
+#                          pages, not two.  The report goes in a read-only text
+#                          window, not a message box, so it can be selected and
+#                          copied.  See the Schematic Check block.
+#     Close Page        -> walks EVERY design the session has open, one at a
+#                          time, and closes that project's pages while leaving
+#                          its Project Manager standing.  The project that was
+#                          active before is active again afterwards.
+#                          mClosePageMode switches it to active-project-only,
+#                          to Window > Close All, or back to the old "all tabs
+#                          but this one".
 #
 #  Schematic Compare flow:
 #     dialog        Default Folder + two .DSN fields, each with Browse.  Whichever
@@ -229,6 +277,22 @@
 package provide mUtilMenu 1.0
 
 namespace eval ::mUtilMenu {
+    # Who this is and what it is.  See the file header.
+    #
+    # mVersion is printed - it is on the banner of every report, so a pasted-back
+    # log always says which build produced it, which is the whole reason for
+    # having a version at all.  Bump it here and every banner follows; nothing
+    # else hard-codes the number.
+    #
+    # mAuthor and mCompany are NOT printed by anything that runs normally.  They
+    # are here to be carried with the file and to be readable on request - About
+    # returns them, diag prints them - and deliberately nowhere else: a dump is
+    # for reading schematic data, not for reading a byline, and the column
+    # alignment in those dumps is worked out to the character.
+    variable mVersion "1.00"
+    variable mAuthor  "LEO"
+    variable mCompany "ASROCK"
+
     variable mMenuId    "mUtil"
     variable mMenuLabel "mUtil"
 
@@ -376,15 +440,39 @@ namespace eval ::mUtilMenu {
     variable mIterSeq 0
 
     # Units the page dump prints coordinates in:
-    #   user - inches as Capture's status bar shows them, 2 decimals (default)
+    #   user - the page's OWN user unit, as Capture's status bar shows it (default)
     #   doc  - raw internal integers, exact but granularity-dependent
+    #
+    # "user" is not necessarily inches.  GetPhysicalGranularity is doc units per
+    # USER unit, and a metric page's user unit is the millimetre - which is why a
+    # metric page dumps coordinates like (152.40,119.38) where an inch page of the
+    # same size dumps (6.00,4.70).  DboPage::GetIsMetric is what tells the two
+    # apart and CoordUnitLabel is what asks it, so every column heading says which
+    # of the two it is printing.
     variable mCoordMode "user"
+
+    # Decimal places every "user" coordinate is printed to - see Coord, which is
+    # the single place the conversion happens, so this moves Parts, Symbols, Nets,
+    # Buses, the pin connection points and the measured gaps together.
+    #
+    # 2, because that is the whole of the precision there is to print.  The
+    # database holds positions as INTEGER doc units - every getter behind these
+    # columns (DboWire GetStartPoint / GetEndPoint for net and bus ends,
+    # GetOffsetHotSpot for a pin, GetLocation for a symbol) returns a CPoint whose
+    # x and y are ints - so the printed value is doc/granularity and its resolution
+    # is one part in the granularity.  At the usual granularity of 100 the smallest
+    # step that can exist is 0.01 of a user unit (0.01 in, or 0.01 mm on a metric
+    # page) and a third decimal can only ever print 0.  Cadence's own converter
+    # truncates at the same place (capDRCFramework/tcl/capCustomDRC.tcl:159-161).
+    #
+    # Raise it to 3 only for a page whose grid block reports a granularity of 1000.
+    variable mCoordDecimals 2
 
     # What Compare marks on the (N) page once it is done.  Both are filled by
     # DumpFullCompare, consumed by DrawCompareMarkerLine, and reset at the top of
     # every compare so a second Compare never redraws the first one's findings.
     # Coordinates are doc units, straight off the object - never re-parsed out of
-    # the printed dump, which is rounded to two decimals.
+    # the printed dump, which is rounded to mCoordDecimals places.
     #
     #   mMarkSegs   one line per wire to mark, {label x1 y1 x2 y2}.  Two sources:
     #                 nets   whatever net_compare_rule1..4 hit - see
@@ -399,8 +487,8 @@ namespace eval ::mUtilMenu {
     # cover it: a horizontal wire's marker goes up by this much, a vertical wire's
     # marker goes right by it.  Diagonal wires are marked in place.
     #
-    # Given in the user units the dump prints - the 220.22 / 65.02 in
-    # "(220.22,65.02)-(204.22,65.02)" - and multiplied by the page's physical
+    # Given in the user units the dump prints - the 220.220 / 65.020 in
+    # "(220.220,65.020)-(204.220,65.020)" - and multiplied by the page's physical
     # granularity to reach the doc units the Dbo call wants.  Set
     # mLineOffsetUnits to "doc" to give it in raw doc units instead.
     # 0 = no nudge at all: the marker sits exactly on top of the wire it marks.
@@ -427,6 +515,72 @@ namespace eval ::mUtilMenu {
     # did before the filter existed.
     variable mRule4MinPins 5
 
+    # 1 = the Nets dump prints the schematic-wide net name in brackets after the
+    #     page label whenever the two differ:
+    #
+    #       Nets    +3.3VSB (+3.3VSB_9631)       wires: 6
+    #
+    #     which says the label drawn on this page is +3.3VSB but what the netlist
+    #     sees is +3.3VSB_9631, because another page has its own +3.3VSB and
+    #     nothing joins the two.  Matching names print once, unbracketed, so a
+    #     bracket in this column always means something.
+    # 0 = page label only, the way it printed before.
+    #
+    # It costs one extra call per net (SchNetName) and nothing else: element 0 of
+    # a net row is untouched, so the compare signatures, the netlist rules and
+    # Schematic Check's net lists all see exactly what they saw before.
+    variable mNetShowSchName 1
+
+    # 1 = the Nets section leaves BUSES out.  Two separate skips, and the second
+    #     is the one that matters:
+    #
+    #       IsBusNet    drops the bus's own net object.  DboPageNetsIter hands
+    #                   back every net on the page and a bus IS a net, so without
+    #                   this the bus appears as a row of its own as well as under
+    #                   Buses.
+    #       IsBusWire   drops the bus's wires out of a bus MEMBER's wire list.
+    #                   DboNet::NewWiresIter on V_M_BMC_DDR4_DQ0 returns the bus
+    #                   wires the member travels along, and so does every other
+    #                   member - one real page had 482 of 835 wire lines being the
+    #                   same bus repeated, and 400 false "two nets that did not
+    #                   merge" findings out of it, because sixteen nets were all
+    #                   claiming an endpoint at the same coordinate.
+    #
+    # 0 = the old behaviour: bus wires appear under Nets, once per member net,
+    #     as well as under Buses.
+    #
+    # Bus MEMBERS themselves are unaffected either way.  D[0] is a scalar net that
+    # belongs to a bus, not a bus; what it loses is only the bus's wires, and it
+    # keeps its own - the piece of wire that runs from the pin to the bus, which
+    # is the part a near-miss check has any business looking at.
+    #
+    # This changes what the Nets rows ARE, so unlike mNetShowSchName it is visible
+    # to everything reading them - the compare's Nets signature diff, NetsByName
+    # and the netlist rules, and Schematic Check's two checks.  That is the point:
+    # a bus was never a signal any of them should have been reasoning about.
+    # NetLabelOf applies the same wire skip, so the name a pin reports and the
+    # name the Nets section prints cannot drift apart.
+    variable mNetSkipBuses 1
+
+    # 1 = a symbol's connection point is snapped to the nearest edge MIDPOINT of
+    #     its bounding box.  See SymHotSpotDoc, which is also where the rotated
+    #     GND symbol that made this necessary is written up.
+    #
+    #     The assumption, and it is worth stating because it is the whole basis of
+    #     the snap: an off-page connector, a power/ground symbol and a port each
+    #     have exactly ONE pin and it is centred on one edge of the symbol.  That
+    #     is true of every stock symbol and of every custom one this project has,
+    #     but a home-made symbol with an off-centre pin would be moved to the
+    #     middle of its edge by this - by at most half an edge.
+    # 0 = take the getter's answer as it stands.  Correct for such a symbol, and
+    #     wrong by half a symbol for every rotated stock one, which is why it is
+    #     not the default.
+    #
+    # Either way this is only reached when the symbol has NO wire on it: a symbol
+    # that is connected gets its pin from the wire end, exactly, and neither this
+    # nor the getters are consulted.
+    variable mSymHotSpotSnap 1
+
     # 1 = the Parts dump prints one line per pin - pin number, pin name, the pin's
     #     connection point in doc units, and what the pin is connected to
     #     (net name / NC / unconnected).
@@ -436,6 +590,71 @@ namespace eval ::mUtilMenu {
     # netlist compare reads the connection point whatever this is set to - it goes
     # through CollectPinInfo, not through the printout.
     variable mPinDetail 1
+
+    # 1 = read EVERY pin's connection point, wired or not.
+    # 0 = only the pins that sit on a net, which is what a compare can use.
+    #
+    # This is the one place Schematic Check and Schematic Compare deliberately walk
+    # the database differently, and the difference is paid for in time:
+    #
+    #   Compare (0)  a pin on no net is in no netlist, so net_compare_rule4 can
+    #                never reach it - reading its position would be three Dbo calls
+    #                spent on a number nothing looks at.  The mRule4MinPins filter
+    #                skips whole small parts on top of that.
+    #   Check   (1)  the dump IS the answer, and "where is this NC pin" is exactly
+    #                what is being asked.  So both skips are lifted: every pin of
+    #                every part gets its position read, and an unwired or
+    #                no-connect pin prints its coordinates like any other.
+    #
+    # It changes the PRINTOUT only.  CollectNetlist skips a pin with no net before
+    # it ever looks at element 4, so no compare's answer moves either way - the
+    # cost is the only thing that does, which is why CheckOnePage raises it around
+    # its own dump and puts it straight back.
+    variable mPinPosAll 0
+
+    # Schematic Check's near-miss search - see Search_Missing_connection_onGrid.
+    # Two endpoints closer together than this, and not already on the same net,
+    # are reported as "meant to touch, does not touch".
+    #
+    # mGridMinDis is what CheckOnePage passes as the proc's min_dis; the proc's
+    # own default is the same 0.5, so calling it by hand from the Command Window
+    # with no tolerance behaves the same way as the menu does.
+    #
+    # mGridMinDisUnits says what the NUMBER means - GridTolDoc is the conversion:
+    #
+    #   grid  SNAP GRID STEPS (default).  0.5 = half a step, whatever the page's
+    #         user unit happens to be, because the step is defined in inches
+    #         (mGridStepInch) and converted with DboPage::GetDocUnitsPerInch.
+    #         Half a step is the tolerance that answers the actual question: a
+    #         wire that stopped less than one grid step short of what it was drawn
+    #         towards.  Anything further away than that is geometry the RD placed
+    #         deliberately.
+    #   user  the units the dump prints.  Watch out: those are the PAGE's units,
+    #         so on a metric page 0.05 means 0.05 MM - a fiftieth of a grid step,
+    #         which is tight enough to find nothing at all.  This mode is for
+    #         saying "anything within 0.3 mm" on purpose, not for grid work.
+    #   doc   raw doc-unit integers, no conversion.
+    #
+    # The mode exists because "half a grid step" was the intent and "0.05" only
+    # meant that on an inch page: the same 0.05 on a metric page came to 0.05 mm
+    # and quietly missed a 0.25 mm near-miss.  Steps are unit-free, so grid mode
+    # cannot be read wrong on either kind of page.
+    variable mGridMinDis      0.5
+    variable mGridMinDisUnits "grid"
+
+    # One snap grid step, in INCHES.  Capture's schematic grid is 0.1 in and every
+    # standard library part is built on it, metric page or not - which is why the
+    # step is defined here in inches and converted per page rather than being
+    # guessed from the coordinates.  Change it only for a design drawn on a
+    # non-standard snap grid.
+    variable mGridStepInch 0.1
+
+    # How many near-miss pairs Search_Missing_connection_onGrid PRINTS, nearest
+    # first.  It always returns and counts them all - this caps the listing only,
+    # the same way mRefListMax caps the compare's.  A wide min_dis on a dense page
+    # really can find thousands of pairs, and the first few hundred are the ones
+    # worth reading.  0 or less = print everything.
+    variable mGridListMax 200
 
     # 1 = every off-page connector / power symbol / port in the Off-Page / Power /
     #     Ports dump gets a second line saying what it is attached to (net name, or
@@ -451,21 +670,37 @@ namespace eval ::mUtilMenu {
     # so instead of dying inside the Dbo call.
     #
     # There is no RGB setter - SetColor takes an index into Capture's fixed
-    # 48-entry palette (Capture.exe, table at 0xE33E40; index 40 is black and 47
-    # is white, which is what capDParts/capDynObjects.tcl:17-23 maps "black" and
-    # "white" onto, so the index and the COLORn number line up).  Neither wanted
-    # colour is in it exactly, so each is the nearest entry:
+    # 48-entry palette.  The table is in Capture.exe at FILE OFFSET 0xE33E40 (48
+    # consecutive COLORREFs, 0x00BBGGRR), and it is the standard 8-wide by 6-tall
+    # Windows colour grid.  Index 40 is black and 47 is white, which is exactly
+    # what capDParts/capDynObjects.tcl:17-23 maps "black" and "white" onto - so
+    # the COLORn number is that table's index, read straight off:
     #
-    #   pink RGB(255,192,203)         turquoise RGB(64,224,208)
-    #     COLOR7   RGB(255,128,255)     COLOR9   RGB(  0,255,255)  cyan  <- default
-    #       light magenta   <- default   COLOR1   RGB(128,255,255)  pale cyan
-    #     COLOR21  RGB(255,128,128)     COLOR42  RGB( 64,128,128)  dark teal
-    #       salmon
-    #     COLOR31  RGB(255,  0,128)   COLOR9 and COLOR1 are the same RGB distance
-    #       rose / hot pink            away; COLOR9 wins on lightness (turquoise is
-    #                                  56% light, COLOR9 is 50%, COLOR1 is 75%) and
-    #                                  on contrast against this project's pale green
-    #                                  page background, RGB(199,237,204).
+    #     0 255,128,128    8 255,  0,  0   16 128, 64, 64   24 128,  0,  0
+    #     1 255,255,128    9 255,255,  0   17 255,128, 64   25 255,128,  0
+    #     2 128,255,128   10 128,255,  0   18   0,255,  0   26   0,128,  0
+    #     3   0,255,128   11   0,255, 64   19   0,128,128   27   0,128, 64
+    #     4 128,255,255   12   0,255,255   20   0, 64,128   28   0,  0,255
+    #     5   0,128,255   13   0,128,192   21 128,128,255   29   0,  0,160
+    #     6 255,128,192   14 128,128,192   22 128,  0, 64   30 128,  0,128
+    #     7 255,128,255   15 255,  0,255   23 255,  0,128   31 128,  0,255
+    #
+    #    32  64,  0,  0   40   0,  0,  0  black
+    #    33 128, 64,  0   41 128,128,  0
+    #    34   0, 64,  0   42 128,128, 64
+    #    35   0, 64, 64   43 128,128,128  the only mid grey
+    #    36   0,  0,128   44  64,128,128
+    #    37   0,  0, 64   45 192,192,192
+    #    38  64,  0, 64   46  64,  0, 64
+    #    39  64,  0,128   47 255,255,255  white
+    #
+    # The two compare markers were picked before that table was read and their
+    # numbers were taken from a guessed ordering, so what they actually draw is
+    # COLOR7 = RGB(255,128,255) light magenta (close enough to the pink that was
+    # wanted) and COLOR9 = RGB(255,255,0) YELLOW rather than the turquoise the
+    # comment used to claim.  Left as they are - the compare's colours are not
+    # this change's business - but COLOR12 is the cyan, if the boxes should ever
+    # actually be turquoise.
     #
     # Widths are THIN_WIDTH / MEDIUM_WIDTH / WIDE_WIDTH / DEFAULT_LINE_WIDTH.
     #
@@ -499,6 +734,196 @@ namespace eval ::mUtilMenu {
     # Boxes stay solid - a rectangle round a part is already unmistakably not
     # schematic content.  Same enum set as mMarkLineStyle if that ever changes.
     variable mMarkBoxStyle  ""
+
+    # What Schematic Check draws on the page for each near miss it finds - see
+    # MarkGridFindings.  Separate from the compare's mMark* set on purpose: the two
+    # features mark for different reasons and should not have to share a palette.
+    #
+    #   mChkNetColor    the net the finding is ABOUT - "this net stops short"
+    #                   COLOR6  RGB(255,128,192), the closest thing to pink in the
+    #                   palette (COLOR7, the compare's, is a magenta)
+    #   mChkOtherColor  the other net, when the near miss is net-against-net
+    #                   COLOR43 RGB(128,128,128), the only mid grey there is - 40
+    #                   is black and 45 is silver
+    #   mChkBoxColor    the box round the pin's part, the symbol or the bus end
+    #                   COLOR36 RGB(0,0,128) navy.  COLOR29 RGB(0,0,160) and
+    #                   COLOR28 RGB(0,0,255) are the brighter blues if navy is too
+    #                   dark against a dark page background.
+    #
+    # The lines are dash-dot for the same reason the compare's are: a solid pink
+    # line lying along a net looks like schematic content and a dash-dot one
+    # cannot be.  Boxes are solid.
+    variable mChkNetColor   "DboValue_COLOR6"
+    variable mChkOtherColor "DboValue_COLOR43"
+    variable mChkBoxColor   "DboValue_COLOR36"
+    variable mChkLineWidth  "DboValue_WIDE_WIDTH"
+    variable mChkLineStyle  "DboValue_DASH_DOT_LINE"
+    variable mChkBoxWidth   "DboValue_WIDE_WIDTH"
+    variable mChkBoxStyle   ""
+
+    # 1 = Schematic Check draws those markers on the page.  They are real graphic
+    #     objects, so the page comes out MODIFIED and Capture will offer to save it
+    #     - exactly like the compare's markers, and Undo takes them off again.
+    # 0 = report in the Command Window and the message box only, touch nothing.
+    variable mChkMark 1
+
+    # 1 = a whole-schematic / whole-design / whole-project run also prints its
+    #     per-page detail to the Command Window, the same as selecting each page
+    #     on its own would.
+    # 0 = only the final summary is printed (default).
+    #
+    # Nothing about WHAT gets checked changes either way - the pages are walked,
+    # the rows collected and the markers drawn identically.  This is purely about
+    # printing, and printing is the expensive part: a 100-page design's dumps are
+    # a few hundred thousand lines through the Command Window, which takes far
+    # longer than the search itself and buries the one summary anybody wanted.
+    #
+    # A single page selected in the Project Manager always prints everything -
+    # for one page the dump IS the answer - and this setting does not apply to it.
+    variable mChkBatchDetail 0
+
+    # How many net names the message box lists under one page before it says
+    # "+N more".  The Command Window listing is not capped by this; the dialog is
+    # a fixed-size window and a page with sixty involved nets would push the
+    # totals off the bottom of it.
+    variable mChkNetListMax 12
+
+    # The Schematic Check dialog - one CHECKBOX per check, Start / Close.  The
+    # menu item does not check anything on its own: it asks which checks first,
+    # because there is more than one thing that can be wrong with a net and they
+    # cost very different amounts of time to look for.
+    #
+    # Checkboxes and not radio buttons, because the checks are not alternatives -
+    # a design can have both faults at once and there is no reason to walk it
+    # twice to be told so.  Both start ticked.
+    #
+    #   mChkWin   the toplevel, kept in a variable so a second menu click raises
+    #             the dialog that is already open instead of building another one
+    variable mChkWin ".mUtilSchCheck"
+
+    # {value label globalVar} for every row of that dialog, in the order they are
+    # shown, and the whole of what the dialog knows about the checks - adding a
+    # third one means one entry here and one branch in RunSchematicCheckMode.
+    #
+    #   grid       NETs not on Grid, cause connection missing.  The near-miss
+    #              geometry search - Search_Missing_connection_onGrid, and
+    #              everything under RunSchematicCheckOnSelection.  The one that
+    #              is written.
+    #   globalref  NETs have no global reference, but net name is the same.  Two
+    #              pages both carrying a net called +VCC1.8V with no Off-Page /
+    #              Power / Port symbol on either of them: the two read as one net
+    #              and are not joined, which is the same class of fault as the
+    #              near miss but found by NAME across pages rather than by
+    #              geometry within one page.  Capture makes the schematic-level
+    #              names unique when that happens, and the serial number it hangs
+    #              off one of them is the evidence - see NetNameConflictSuffix
+    #              and PageNameConflicts.  Every wire of every net it finds is
+    #              drawn over in pink (MarkNameConflicts), so the page shows which
+    #              copper the report is talking about.  The page is not renamed
+    #              '*' - that is the grid check's flag for "there is geometry to
+    #              look at here", and the report already names the pages.
+    #
+    # Element 2 is the name of the checkbox's variable, and it is deliberately a
+    # BARE GLOBAL rather than something under ::mUtilMenu.  These two are meant to
+    # be read and written from the Command Window as SCH_CHECK_ITEM1 /
+    # SCH_CHECK_ITEM2 with no namespace to spell, and the checkbutton is bound
+    # straight to them, so ticking a box IS the assignment - there is no separate
+    # copy that could disagree with what the dialog shows.
+    variable mChkModes [list \
+        [list grid      "NETs not on Grid, cause connection missing"              SCH_CHECK_ITEM1] \
+        [list globalref "NETs have no global reference, but net name is the same." SCH_CHECK_ITEM2] ]
+
+    # 1 = ticked.  Set here so they exist before the dialog is ever opened - the
+    # Command Window, the no-Tk fallback and Start all read them whether or not a
+    # window was built.  ChkItemsNormalize puts anything that is not 0 or 1 back
+    # to a 0 or a 1 before they are used.
+    set ::SCH_CHECK_ITEM1 1
+    set ::SCH_CHECK_ITEM2 1
+
+    # What mUtil > Close Page closes.  See DoClosePage and the two procs above it
+    # for the commands behind each one.
+    #
+    #   perdesign      THE DEFAULT.  Walks every design the session has open -
+    #                  SessionDesigns - brings each one's Project Manager to the
+    #                  front in turn, and closes that project's pages while
+    #                  keeping its Project Manager.  Every page of every open
+    #                  .DSN closed, every Project Manager still standing, and the
+    #                  project that was active before is active again afterwards.
+    #   allbutpm       the same thing for the ACTIVE project only, in one shot -
+    #                  capCloseChildViews(GetActivePM()).  This was the default
+    #                  until SessionDesigns existed; with two projects open it
+    #                  protects one Project Manager and closes the other.
+    #   all            Window > Close All: every child view, Project Manager
+    #                  included.  capCloseChildViews().
+    #   exceptcurrent  what this item did originally: every page BUT the one on
+    #                  top - the tab RMB's "Close All Tabs But This".
+    #                  capCloseChildViewsExceptCurrent().
+    #
+    # What none of them can do is close ONE named page: Appendix A has no
+    # per-page close, only the three whole-frame ones above.  "Page by page" is
+    # therefore per-DESIGN here, which is as fine-grained as the API goes.
+    #
+    # .OPJ files are not enumerated because they cannot be - see SessionDesigns.
+    # A project's pages are its design's pages, so walking the designs covers the
+    # projects; what is not covered is a .OPJ open with no design loaded, which
+    # has no pages to close anyway.
+    variable mClosePageMode "perdesign"
+
+    # Which no-argument getter names the document Close Page must NOT close, in
+    # the order they are tried.  Both return a CDocument, which is the type
+    # capCloseChildViews declares for pExclude - GetActivePM does not, and that
+    # is what made every call fail with "No matching function for overloaded
+    # 'capCloseChildViews'".  The full story is at ClosePagesKeepingPM.
+    #
+    # Add a name here to try another one; drop one to stop trying it.  A getter
+    # this Capture does not have is skipped, not an error.
+    variable mClosePageDocGetters { capGetActivePMDoc capGetActiveDocument }
+
+    # 1 = after closing, open every design again, so a project whose window went
+    #     with its pages comes back.  This is what makes the no-argument
+    #     capCloseChildViews safe to use - see ClosePagesOfActiveProject for why
+    #     the exclude form is not available at all.  Open on a project that never
+    #     closed simply activates it, so this costs nothing when it is not needed.
+    # 0 = leave whatever the close did.  Only useful for finding out WHETHER the
+    #     no-argument form takes the Project Manager with it: run Close Page once
+    #     with this at 0 and look at what is left.
+    variable mClosePageReopen 1
+
+    # How many times Close Page will repeat the close on one project before it
+    # gives up.  One call to capCloseChildViews does NOT empty the frame in this
+    # Capture - the symptom that led here was "each project only lost a single
+    # page" - so the close is repeated until EnableAllWindowCloseMenu() reports
+    # nothing left.  See ClosePagesUntilDone.
+    #
+    # 200 is a backstop, not a budget: the loop normally ends because Capture
+    # says there is nothing left, and the cap only matters if that never happens.
+    # A design with more open pages than this would stop short and say so.
+    variable mClosePageMaxRounds 200
+
+    # The close commands Close Page will try, in order, and it moves on as soon
+    # as one stops achieving anything - see ClosePagesUntilDone.
+    #
+    #   all            capCloseChildViews with NO argument.  Window > Close All,
+    #                  which is what Cadence's own capCloseAllChildWindows.tcl:8
+    #                  registers it as.  First because it is the only one that
+    #                  can empty a project on its own.
+    #   exceptcurrent  capCloseChildViewsExceptCurrent.  Known to work - it is
+    #                  what closed pages on the very first run - but it can never
+    #                  reach zero by itself, because the last page left is the
+    #                  current one.  Useful as the follow-up, not as the answer.
+    #
+    # "exclude" - capCloseChildViews WITH a document - is deliberately NOT here.
+    # It does not fail, it succeeds and closes nothing: a real run spent 200
+    # rounds on it per project and shut no window at all.  Add it back only if a
+    # Capture build turns up where the argument means something else, and put it
+    # last if you do.
+    variable mClosePageRoutes { all exceptcurrent }
+
+    # How many rounds a route may change nothing before Close Page gives up on it
+    # and tries the next.  2, because one round that changes nothing is already
+    # suspicious and there is no cost to being wrong - the next route is tried,
+    # not the whole thing abandoned.
+    variable mClosePageStallRounds 2
 
     # 1 = pop a message box every time a callback fires, so it is obvious
     #     which menu mechanism actually reaches the TCL code.
@@ -591,6 +1016,64 @@ proc ::mUtilMenu::Out { args } {
     }
     # {*} rather than "eval puts $args": a net name really can be "ADDR[0..7]",
     # and eval would try to run the brackets.
+    puts {*}$args
+}
+
+# A held-back block of lines, printed in one go.  DoSchematicCheck builds its
+# selection diagnostics before it knows whether this run is allowed to print at
+# all, so the lines are collected in a list and handed here once that is decided.
+proc ::mUtilMenu::OutLines { pLines } {
+    foreach lLine $pLines {
+        ::mUtilMenu::Out $lLine
+    }
+}
+
+# "mUtil 1.00" - what goes on a banner line.
+#
+# One place, so bumping mVersion moves every banner at once and none of them can
+# be left saying an old number.
+proc ::mUtilMenu::VerStr { } {
+    variable mVersion
+    return "mUtil $mVersion"
+}
+
+# The full identification, on request only.  Nothing in normal operation calls
+# this - it is for the Command Window:
+#
+#   puts [::mUtilMenu::About]     ->  mUtil 1.00 - LEO, ASROCK
+proc ::mUtilMenu::About { } {
+    variable mAuthor
+    variable mCompany
+    return "[::mUtilMenu::VerStr] - $mAuthor, $mCompany"
+}
+
+# A report's first line: what produced it, which build, and what it is about.
+#
+#   ================================================================
+#   mUtil 1.00  Schematic Check - Design W980_WS.DSN
+#   ================================================================
+#
+# The version sits at the FRONT of the banner and nowhere else.  Putting it on
+# every Out line was the other option and it is the wrong one: the dumps are
+# column-aligned with format to the character - "%-28s wires: %d" and the rest -
+# and a prefix on every line would push every column out and make the coordinate
+# tables unreadable.  A banner per report says which build wrote the log just as
+# well, and a log is read from the top.
+proc ::mUtilMenu::Banner { pWhat } {
+    return "[::mUtilMenu::VerStr]  $pWhat"
+}
+
+# Out, but mQuiet cannot silence it.
+#
+# For the handful of lines whose whole job is to be seen WHILE a long run is in
+# progress.  A schematic, a design or a project is checked with mQuiet raised for
+# the length of the loop - that is what stops forty pages of dump reaching the
+# Command Window - and a progress line put through Out would be swallowed by the
+# very thing it is there to report on.
+#
+# Deliberately rare.  Anything that can wait until the run is over belongs in the
+# report, and the report is printed after mQuiet has been put back.
+proc ::mUtilMenu::OutAlways { args } {
     puts {*}$args
 }
 
@@ -982,6 +1465,21 @@ proc ::mUtilMenu::GetDesignPages { pDsnPath } {
 #
 # so an unwired pin and a pin with an X on it are two different answers, and
 # CollectPinInfo reports them as two different answers.
+#
+# The page net -> schematic net step behind SchNetName is checked the same way,
+# and note that the first of the three takes NO status argument where nearly
+# every other getter in this file does:
+#
+#   DboNet_GetSchematicNet       self            the DboSchematicNet, or NULL
+#   DboSchematicNet_GetName      self name       name is a CString&
+#   DboSchematicNet_GetLocalNetName self name    the name before Capture made it
+#                                                unique - not used, but it is the
+#                                                other half of the pair and worth
+#                                                knowing is there
+#
+# capDRCFramework/tcl/capProcessDRC.tcl:255-258 walks that link the other way
+# round (net occurrence -> DboSchematicNet -> NewNetsIter -> the page DboNets),
+# which is the same edge and confirms the two objects are related as assumed.
 #-----------------------------------------------------------------------------
 
 # DboPageNetsIter and friends are SWIG constructors: they create a Tcl command
@@ -1009,8 +1507,19 @@ proc ::mUtilMenu::PropStr { pObj pPropName } {
 
 # Internal ("doc") units -> whatever mCoordMode asks for.  The user-unit
 # formula is capCustomDRC's: divide by the page's physical granularity.
+#
+# Granularity is doc units per USER unit, not per inch - GetDocUnitsPerInch is the
+# per-inch one - so on a metric page this returns millimetres.  CoordUnitLabel is
+# what names the result.
+#
+# Every printed coordinate in this file comes through here - part locations and
+# bounding boxes, pin connection points, symbol positions, net and bus wire
+# endpoints, and the gaps Search_Missing_connection_onGrid measures between them -
+# so mCoordDecimals is the one place the printed precision is decided and the
+# columns cannot drift apart from one another.
 proc ::mUtilMenu::Coord { pPage pDoc } {
     variable mCoordMode
+    variable mCoordDecimals
 
     if { $mCoordMode eq "doc" } {
         return $pDoc
@@ -1020,7 +1529,40 @@ proc ::mUtilMenu::Coord { pPage pDoc } {
     if { $lGran <= 0 } {
         return $pDoc
     }
-    return [format "%.2f" [expr { double($pDoc) / $lGran }]]
+    return [format "%.${mCoordDecimals}f" [expr { double($pDoc) / $lGran }]]
+}
+
+# What Coord is really going to hand back for this page, as the word a column
+# heading can be labelled with:
+#
+#   mm    the page is metric - DboPage::GetIsMetric says 1, so its user unit is
+#         the millimetre and that is what dividing by the granularity produced
+#   in    an inch page
+#   doc   the doc integers came through unconverted - either because mCoordMode
+#         asked for raw units, or because the page would not give a granularity
+#         and Coord fell back to the doc value
+#
+# It repeats Coord's two tests rather than trusting mCoordMode on its own, so a
+# heading can never claim a unit over a column Coord left in doc units.  A page
+# that will not answer GetIsMetric is called inches, which is Capture's default
+# (DboLib::GetDefaultIsMetric is the design-wide version of the same flag).
+proc ::mUtilMenu::CoordUnitLabel { pPage } {
+    variable mCoordMode
+
+    if { $mCoordMode eq "doc" || $pPage eq "" } {
+        return "doc"
+    }
+    set lGran 0
+    catch { set lGran [$pPage GetPhysicalGranularity] }
+    if { $lGran <= 0 } {
+        return "doc"
+    }
+    set lMetric 0
+    catch { set lMetric [$pPage GetIsMetric] }
+    if { $lMetric } {
+        return "mm"
+    }
+    return "in"
 }
 
 # Empty values print as "-" so a missing property is visible in the dump rather
@@ -1057,9 +1599,23 @@ proc ::mUtilMenu::ObjLocStr { pPage pObj pStatus } {
     return [string trim $lOut]
 }
 
+# The placement origin as raw doc integers, {x y}, or {} when it cannot be read -
+# the same GetLocation ObjLocStr prints, before Coord rounded it for printing.
+# For an off-page connector, a power symbol or a port that origin IS the point a
+# wire has to land on, which is what Search_Missing_connection_onGrid measures
+# from.
+proc ::mUtilMenu::ObjLocDoc { pObj pStatus } {
+    set lOut [list]
+    catch {
+        set lPt  [$pObj GetLocation $pStatus]
+        set lOut [list [DboTclHelper_sGetCPointX $lPt] [DboTclHelper_sGetCPointY $lPt]]
+    }
+    return $lOut
+}
+
 # The same bounding box as raw doc integers, {left top right bottom}, or {} when
-# it cannot be read.  What ObjLocStr prints has been through Coord and rounded to
-# two decimals - fine to read, useless to draw from - so the marker rectangles are
+# it cannot be read.  What ObjLocStr prints has been through Coord and rounded -
+# fine to read, useless to draw from - so the marker rectangles are
 # built off this instead.  Page coordinates run y downward, so top < bottom, which
 # is the order CRect itself wants.
 proc ::mUtilMenu::ObjBBoxDoc { pObj } {
@@ -1074,6 +1630,257 @@ proc ::mUtilMenu::ObjBBoxDoc { pObj } {
     return $lOut
 }
 
+# Manhattan distance from a {x y} doc point to a {left top right bottom} doc box,
+# 0 when the point is inside it or on its edge.
+#
+# min/max rather than trusting the corner order: CRect's top is the SMALLER y on a
+# page (y grows downward) and that is what ObjBBoxDoc hands back, but a rectangle
+# that came out the other way round would silently make every test fail.
+proc ::mUtilMenu::PtBoxDistDoc { pPt pBox } {
+    if { [llength $pPt] != 2 || [llength $pBox] != 4 } {
+        return -1
+    }
+
+    set lX1 [expr { min([lindex $pBox 0], [lindex $pBox 2]) }]
+    set lX2 [expr { max([lindex $pBox 0], [lindex $pBox 2]) }]
+    set lY1 [expr { min([lindex $pBox 1], [lindex $pBox 3]) }]
+    set lY2 [expr { max([lindex $pBox 1], [lindex $pBox 3]) }]
+
+    set lX [lindex $pPt 0]
+    set lY [lindex $pPt 1]
+
+    set lDx 0
+    if { $lX < $lX1 } { set lDx [expr { $lX1 - $lX }] }
+    if { $lX > $lX2 } { set lDx [expr { $lX - $lX2 }] }
+    set lDy 0
+    if { $lY < $lY1 } { set lDy [expr { $lY1 - $lY }] }
+    if { $lY > $lY2 } { set lDy [expr { $lY - $lY2 }] }
+
+    return [expr { $lDx + $lDy }]
+}
+
+#-----------------------------------------------------------------------------
+# Where an off-page connector / power symbol / port actually CONNECTS
+#
+# GetLocation is the wrong point and always was.  It comes from
+# DboGraphicInstance (?GetLocation@DboGraphicInstance@@) and it is the PLACEMENT
+# ORIGIN - Cadence's own graphics streamer takes it as exactly that
+# (orPrmDboStreamer.tcl:1755 uses it as lInstOrigin, with the rotation, mirror and
+# master bbox applied separately).  For a left-pointing off-page connector it
+# lands on the top-left corner of the bounding box:
+#
+#   OFFPAGE  SMB_CLK_SIO   (19.95,12.40) bbox (19.95,12.40)-(21.78,12.60)
+#                           ^^^^^^^^^^^^ the corner, not the pin
+#
+# The wire lands half a symbol height lower, at (19.95,12.50).  Every distance
+# Search_Missing_connection_onGrid measured against a symbol was therefore out by
+# that much, which at min_dis = half a grid step is enough to turn a real near
+# miss into "nothing found".
+#
+# DboNetSymbolInstance - the class off-page connectors, power symbols and ports
+# all are - carries the right pair, the same naming part pins use (see
+# PinHotSpotDoc for that half):
+#
+#   DboNetSymbolInstance_GetHotSpot            self status
+#   DboNetSymbolInstance_GetOffsetHotSpot      self status
+#   DboNetSymbolInstance_ComputeOffsetHotSpot  self status
+#
+# checked against the SWIG wrappers in tools/bin/orDb_Dll_Tcl64.dll, and against
+# ?GetHotSpot@DboNetSymbolInstance@@QEAA?AVCPoint@@AEAVDboState@@@Z for the return
+# type.  NO shipped script calls either of them on a net symbol instance, so which
+# of the two is a page coordinate and which is an offset from the placement origin
+# is NOT established by anything - and the file's own convention is no guide,
+# because on DboPortInst it is the Offset* one that is page-level.
+#
+# So this does not guess.  It builds every candidate the getters can produce, each
+# read both ways - as a page coordinate, and as an offset to be added to
+# GetLocation - and then asks the geometry which one is real.
+#
+# WHAT THE FIRST VERSION OF THIS GOT WRONG, because it is the whole point of the
+# code below.  It took "the candidate landed inside the bounding box" as proof and
+# returned on the first one that did.  Both halves of that were wrong:
+#
+#   A rotated GND symbol.  loc (2.24,4.00), bbox (2.03,4.00)-(2.34,4.20), pin
+#   pointing right, so the wire lands at (2.34,4.10) - the middle of the right
+#   edge.  GetHotSpot returned (0.10,0.00), which is the top-middle of the symbol
+#   as DRAWN IN THE LIBRARY, 0.20 wide and unrotated: the instance's rotation is
+#   NOT in that number.  Added to loc it gives (2.34,4.00) - the top-right CORNER
+#   of the bbox.  Distance to the bbox: zero.  Accepted, and the loop stopped
+#   there, so GetOffsetHotSpot and ComputeOffsetHotSpot were never even tried.
+#
+#   The error is half a symbol, and it made Schematic Check report net endpoints
+#   as "0.02 from GND" on wiring that is perfectly correct.
+#
+# Two fixes, and the second is the one that matters:
+#
+#   score every candidate, then choose.  First-past-the-post over an ordered list
+#   is choosing by the order they happen to be written in.
+#
+#   SNAP to the nearest edge MIDPOINT of the bounding box.  An off-page connector,
+#   a power/ground symbol and a port all have exactly one pin and it is centred on
+#   one edge - never on a corner.  So the four edge midpoints are the only places
+#   the answer can be, and the getter's job is reduced from "give me the exact
+#   point" to "tell me which edge", which is a question it can still answer
+#   correctly with its rotation missing: (2.34,4.00) is 0.10 from the right-edge
+#   midpoint and 0.155 from the top-edge one, so it snaps to the right edge and
+#   comes out at (2.34,4.10).
+#
+# Snapping also means this never had to work out Capture's rotation convention -
+# which of rotation 0/1/2/3 is clockwise, and what mirror does to it - and so
+# cannot get it wrong.  DboGraphicInstance::GetRotation / GetMirror are there
+# (they are what orPrmDboStreamer.tcl:1769 feeds to getOffsetFromTransform) if a
+# symbol ever turns up that needs the real transform.
+#
+# Tiers, best first:
+#
+#   1  wire      the symbol is attached to a wire - DboNetSymbolInstance::GetWire
+#                - and a wire END is where the pin is, exactly, with no geometry
+#                assumed at all.  Ground truth, and free.
+#   2  snapped   the best getter candidate, snapped to the nearest edge midpoint.
+#   3  raw       the best getter candidate as it stands (mSymHotSpotSnap 0, or a
+#                symbol with no bounding box to snap against).
+#   4  location  nothing usable - the old behaviour, and a Trace line saying so.
+#
+# Returns {x y route}.  route names the tier and the reading that won, so the dump
+# says what it did instead of leaving it to be inferred.
+#-----------------------------------------------------------------------------
+
+# The four points a single centred pin can sit on.  Returned in the order
+# left, right, top, bottom - only ever consumed as a set, so the order is for
+# reading the code, not for choosing.
+proc ::mUtilMenu::BoxEdgeMidsDoc { pBox } {
+    if { [llength $pBox] != 4 } {
+        return [list]
+    }
+    set lX1 [expr { min([lindex $pBox 0], [lindex $pBox 2]) }]
+    set lX2 [expr { max([lindex $pBox 0], [lindex $pBox 2]) }]
+    set lY1 [expr { min([lindex $pBox 1], [lindex $pBox 3]) }]
+    set lY2 [expr { max([lindex $pBox 1], [lindex $pBox 3]) }]
+
+    set lMx [expr { round(($lX1 + $lX2) / 2.0) }]
+    set lMy [expr { round(($lY1 + $lY2) / 2.0) }]
+
+    return [list [list $lX1 $lMy] [list $lX2 $lMy] \
+                 [list $lMx $lY1] [list $lMx $lY2]]
+}
+
+# Manhattan distance between two {x y} doc points, -1 if either is not a point.
+proc ::mUtilMenu::PtDistDoc { pA pB } {
+    if { [llength $pA] != 2 || [llength $pB] != 2 } {
+        return -1
+    }
+    return [expr { abs([lindex $pA 0] - [lindex $pB 0])
+                 + abs([lindex $pA 1] - [lindex $pB 1]) }]
+}
+
+proc ::mUtilMenu::SymHotSpotDoc { pObj pStatus } {
+    variable mSymHotSpotSnap
+
+    set lLoc  [::mUtilMenu::ObjLocDoc  $pObj $pStatus]
+    set lBBox [::mUtilMenu::ObjBBoxDoc $pObj]
+
+    # Tier 1 - the wire it is attached to.  Whichever end of it is nearer the
+    # symbol is the end that is ON the symbol, and that is the pin.  Guarded by
+    # the bbox so a wire that is somehow miles away cannot hijack the answer.
+    if { [llength $lBBox] == 4 } {
+        set lWire NULL
+        catch { set lWire [$pObj GetWire $pStatus] }
+        if { $lWire ne "NULL" && $lWire ne "" } {
+            set lSeg [::mUtilMenu::WireSegDoc $lWire $pStatus]
+            if { [llength $lSeg] == 4 } {
+                set lBest ""
+                set lBestD -1
+                foreach lEnd [list [lrange $lSeg 0 1] [lrange $lSeg 2 3]] {
+                    set lD [::mUtilMenu::PtBoxDistDoc $lEnd $lBBox]
+                    if { $lD >= 0 && ($lBestD < 0 || $lD < $lBestD) } {
+                        set lBestD $lD
+                        set lBest  $lEnd
+                    }
+                }
+                if { $lBest ne "" && $lBestD == 0 } {
+                    return [list [lindex $lBest 0] [lindex $lBest 1] "wire"]
+                }
+            }
+        }
+    }
+
+    # Every reading of every getter.  ComputeOffsetHotSpot is in the list because
+    # the name says it recomputes rather than reads back, and it may well be the
+    # one that already has the transform in it - the scoring below will say so.
+    set lCand [list]
+    foreach lGetter { GetHotSpot GetOffsetHotSpot ComputeOffsetHotSpot } {
+        set lPt [list]
+        catch {
+            set lC  [$pObj $lGetter $pStatus]
+            set lPt [list [DboTclHelper_sGetCPointX $lC] [DboTclHelper_sGetCPointY $lC]]
+        }
+        if { [llength $lPt] != 2 } {
+            continue
+        }
+        lappend lCand [list $lGetter $lPt]
+        if { [llength $lLoc] == 2 } {
+            lappend lCand [list "$lGetter+loc" \
+                [list [expr { [lindex $lLoc 0] + [lindex $lPt 0] }] \
+                      [expr { [lindex $lLoc 1] + [lindex $lPt 1] }]]]
+        }
+    }
+
+    if { [llength $lBBox] == 4 } {
+        # Score them ALL, then choose - no returning from inside the loop.
+        set lSpan [expr { abs([lindex $lBBox 2] - [lindex $lBBox 0])
+                        + abs([lindex $lBBox 3] - [lindex $lBBox 1]) }]
+        set lBest  ""
+        set lBestD -1
+        foreach lC $lCand {
+            set lD [::mUtilMenu::PtBoxDistDoc [lindex $lC 1] $lBBox]
+            if { $lD < 0 } {
+                continue
+            }
+            if { $lBestD < 0 || $lD < $lBestD } {
+                set lBestD $lD
+                set lBest  $lC
+            }
+        }
+
+        # Within the symbol's own size of it, or it is not this symbol's pin.
+        if { $lBest ne "" && $lBestD <= $lSpan } {
+            set lPt [lindex $lBest 1]
+
+            if { $mSymHotSpotSnap } {
+                set lMid   ""
+                set lMidD  -1
+                foreach lM [::mUtilMenu::BoxEdgeMidsDoc $lBBox] {
+                    set lD [::mUtilMenu::PtDistDoc $lPt $lM]
+                    if { $lD >= 0 && ($lMidD < 0 || $lD < $lMidD) } {
+                        set lMidD $lD
+                        set lMid  $lM
+                    }
+                }
+                if { $lMid ne "" } {
+                    set lTag "[lindex $lBest 0]->edge"
+                    if { $lMidD == 0 } {
+                        # It was already on the midpoint - the getter had the
+                        # rotation in it, and the snap changed nothing.
+                        set lTag [lindex $lBest 0]
+                    }
+                    return [list [lindex $lMid 0] [lindex $lMid 1] $lTag]
+                }
+            }
+
+            return [list [lindex $lPt 0] [lindex $lPt 1] "[lindex $lBest 0]~"]
+        }
+    }
+
+    # Nothing usable.  Not an error - a symbol with no bounding box to check
+    # against ends up here too - but it IS the case where the old
+    # off-by-half-a-symbol behaviour comes back, so it says so.
+    ::mUtilMenu::Trace "no usable hot spot on this symbol ([llength $lCand] candidate(s), bbox {$lBBox}) - falling back to GetLocation"
+    if { [llength $lLoc] == 2 } {
+        return [list [lindex $lLoc 0] [lindex $lLoc 1] "location"]
+    }
+    return [list]
+}
+
 # The two endpoints of one wire, "(x1,y1)-(x2,y2)".
 proc ::mUtilMenu::WireSegStr { pPage pWire pStatus } {
     set lSeg "?"
@@ -1084,8 +1891,8 @@ proc ::mUtilMenu::WireSegStr { pPage pWire pStatus } {
 }
 
 # The same two endpoints as raw doc integers, {x1 y1 x2 y2}, or {} when they
-# cannot be read.  WireSegStr's output has been through Coord and is rounded to
-# two decimals, which is fine to read and useless to draw from - the marker lines
+# cannot be read.  WireSegStr's output has been through Coord and is rounded,
+# which is fine to read and useless to draw from - the marker lines
 # are placed off this instead.
 proc ::mUtilMenu::WireSegDoc { pWire pStatus } {
     set lSeg [list]
@@ -1169,6 +1976,8 @@ proc ::mUtilMenu::CStr { pObj pGetter } {
 # aliases, then NetLabel's fallbacks - but reachable from a pin, which is what
 # CollectPinInfo needs and what the nets walk cannot give it.
 proc ::mUtilMenu::NetLabelOf { pNet pStatus } {
+    variable mNetSkipBuses
+
     set lNullObj NULL
     set lNames   [list]
 
@@ -1176,6 +1985,15 @@ proc ::mUtilMenu::NetLabelOf { pNet pStatus } {
         set lIter [$pNet NewWiresIter $pStatus]
         set lWire [$lIter NextWire $pStatus]
         while { $lWire != $lNullObj } {
+            # Bus wires skipped for the same reason CollectPageNets skips them,
+            # and it has to be the same rule in both places: this proc promises
+            # the answer element 0 of a net row would give, and a pin reporting
+            # "V_M_BMC_DDR4_DQ0 = D[0..7]" against a Nets section that says
+            # "V_M_BMC_DDR4_DQ0" is the two having drifted apart.  See IsBusWire.
+            if { $mNetSkipBuses && [::mUtilMenu::IsBusWire $lWire] } {
+                set lWire [$lIter NextWire $pStatus]
+                continue
+            }
             foreach lName [::mUtilMenu::WireAliases $lWire $pStatus] {
                 if { [lsearch -exact $lNames $lName] == -1 } {
                     lappend lNames $lName
@@ -1186,6 +2004,90 @@ proc ::mUtilMenu::NetLabelOf { pNet pStatus } {
         catch { delete_DboNetWiresIter $lIter }
     }
     return [::mUtilMenu::NetLabel $pNet $lNames]
+}
+
+# What the WHOLE SCHEMATIC calls this page net, or "" if it will not say.
+#
+# A page DboNet and the schematic net it belongs to are two different objects and
+# they do not have to agree on a name.  Two pages can each carry a piece of wire
+# labelled +3.3VSB with nothing joining them - no Off-Page Connector, no Power
+# symbol, no Port - and Capture will not silently weld them into one net just
+# because the labels match.  It keeps them apart and makes the names unique, so
+# one of them stays +3.3VSB and the other becomes something like +3.3VSB_9631.
+#
+# The page label is what is drawn on the page; this is what the netlist, the DRC
+# and PCB Editor will actually see.  When they differ, the difference IS the
+# finding - it is exactly the fault SCH_CHECK_ITEM2 is meant to look for - so the
+# Nets dump prints both rather than picking one.  See PrintNetRows.
+#
+# GetSchematicNet takes no status argument (see the block above) and returns NULL
+# for a net that has not been given a schematic net, which is not an error: an
+# unnamed scrap of wire is entitled to no answer, and "" is that answer.
+#
+# DboSchematicNet has a GetName and a GetLocalNetName and this takes GetName,
+# which is the resolved one - the one carrying the _9631 that
+# DboSchematicNet::ResolveComputedNameConflict put there.  If a real design ever
+# shows the two the other way round, SchNetNames prints both side by side for
+# every net on a page and settles it in one line.
+proc ::mUtilMenu::SchNetName { pNet } {
+    set lSchNet NULL
+    if { [catch { set lSchNet [$pNet GetSchematicNet] }] } {
+        return ""
+    }
+    if { $lSchNet eq "NULL" || $lSchNet eq "" } {
+        return ""
+    }
+    return [::mUtilMenu::CStr $lSchNet GetName]
+}
+
+# Diagnostic: every net on one page with BOTH schematic-net names beside the page
+# label, plus whether the schematic net is global and whether it is shared with
+# another page.  Run in the Command Window against a page that is known to have a
+# duplicated net name on it, e.g.
+#   ::mUtilMenu::SchNetNames {G:/Project/.../board.dsn} SCHEMATIC1 PAGE1
+#
+# This is what says which of GetName / GetLocalNetName carries the _9631 suffix,
+# and it is here rather than in the dump because the dump only needs one of them.
+proc ::mUtilMenu::SchNetNames { pDsnPath pSchName pPageName } {
+    set lPage   [::mUtilMenu::FindPage $pDsnPath $pSchName $pPageName]
+    set lStatus [DboState]
+
+    ::mUtilMenu::Out [format "    %-28s %-28s %-28s %-6s %s" \
+                          "page label" "GetName" "GetLocalNetName" "global" "shared"]
+
+    set lIter [::mUtilMenu::NextIterName SchNetNames]
+    DboPageNetsIter $lIter $lPage $::IterDefs_ALL
+    set lNet [$lIter NextNet $lStatus]
+    set lN   0
+
+    while { $lNet != "NULL" } {
+        incr lN
+
+        set lSchNet NULL
+        catch { set lSchNet [$lNet GetSchematicNet] }
+
+        set lName   "-"
+        set lLocal  "-"
+        set lGlobal "-"
+        set lShared "-"
+        if { $lSchNet ne "NULL" && $lSchNet ne "" } {
+            set lName  [::mUtilMenu::OrDash [::mUtilMenu::CStr $lSchNet GetName]]
+            set lLocal [::mUtilMenu::OrDash [::mUtilMenu::CStr $lSchNet GetLocalNetName]]
+            catch { set lGlobal [$lSchNet IsGlobal $lStatus] }
+            catch { set lShared [$lSchNet IsSchematicNetSharedWithOtherPages $lPage] }
+        }
+
+        ::mUtilMenu::Out [format "    %-28s %-28s %-28s %-6s %s" \
+                              [::mUtilMenu::NetLabelOf $lNet $lStatus] \
+                              $lName $lLocal $lGlobal $lShared]
+
+        set lNet [$lIter NextNet $lStatus]
+    }
+
+    ::mUtilMenu::DropIter $lIter
+    catch { $lStatus -delete }
+    ::mUtilMenu::Out "  ($lN net(s))"
+    return $lN
 }
 
 # Where one pin's connection point is, as doc-unit integers {x y}.
@@ -1302,6 +2204,7 @@ proc ::mUtilMenu::PartPinCount { pPart } {
 # a pointer's Tcl handle after the address, so the same DboNet is the same key
 # whether it came from a pin or from the page's nets iterator.
 proc ::mUtilMenu::CollectPinInfo { pPin pStatus pCacheName {pWantPos 1} } {
+    variable mPinPosAll
     upvar 1 $pCacheName lCache
     set lNullObj NULL
 
@@ -1327,11 +2230,14 @@ proc ::mUtilMenu::CollectPinInfo { pPin pStatus pCacheName {pWantPos 1} } {
         }
     }
 
-    # A pin on no net is in no netlist, so its position can never be used - the
-    # $lNet test is not an optimisation for its own sake, it is the same "nothing
-    # will look at this" rule pWantPos carries.
+    # A pin on no net is in no netlist, so its position can never be used by a
+    # compare - the $lNet test is not an optimisation for its own sake, it is the
+    # same "nothing will look at this" rule pWantPos carries.
+    #
+    # mPinPosAll lifts it, which is what makes an NC or unwired pin print its
+    # coordinates instead of a "-" under Schematic Check.  See the variable.
     set lPos [list]
-    if { $pWantPos && $lNet ne "" } {
+    if { $pWantPos && ( $lNet ne "" || $mPinPosAll ) } {
         set lPos [::mUtilMenu::PinHotSpotDoc $pPin $pStatus]
     }
 
@@ -1363,6 +2269,32 @@ proc ::mUtilMenu::ConnStr { pNoConnect pNetLabel } {
 # The connection half of one CollectPinInfo record, as the dump prints it.
 proc ::mUtilMenu::PinConnStr { pPin } {
     return [::mUtilMenu::ConnStr [lindex $pPin 2] [lindex $pPin 3]]
+}
+
+# The position half of one CollectPinInfo record, as the dump prints it, or "-"
+# when the record carries no position (see PrintPartRows for the three reasons).
+#
+# Element 4 is raw doc integers and stays that way - net_compare_rule4 matches it
+# against wire endpoints, which are raw too - so the conversion happens HERE, at
+# the printout, and only there.  It goes through the same Coord the Parts
+# location, the Symbols, the Nets and the Buses columns go through, which is what
+# makes a pin at (680,750) doc print as (6.80,7.50) next to a net wire that ends
+# at (6.80,7.50) instead of a hundred times away from it.
+#
+# The divisor is the page's own GetPhysicalGranularity - 100 doc units per inch
+# on a normal page, which is where "divide by 100" comes from, but it is read
+# from the page rather than assumed, and CheckOnePage prints it in the grid block.
+# pPage "" leaves the doc integers alone, so a caller with no page in hand still
+# gets a number rather than an error.
+proc ::mUtilMenu::PinPosStr { pPage pPin } {
+    set lPos [lindex $pPin 4]
+    if { [llength $lPos] != 2 } {
+        return "-"
+    }
+    if { $pPage eq "" } {
+        return "([lindex $lPos 0],[lindex $lPos 1])"
+    }
+    return "([::mUtilMenu::Coord $pPage [lindex $lPos 0]],[::mUtilMenu::Coord $pPage [lindex $lPos 1]])"
 }
 
 # What one off-page connector / power symbol / port is joined to - the same
@@ -1461,6 +2393,7 @@ proc ::mUtilMenu::SymbolConn { pObj pStatus pCacheName } {
 # position - a part of mRule4MinPins pins or fewer, or a pin on no net.
 proc ::mUtilMenu::CollectPageParts { pPage } {
     variable mRule4MinPins
+    variable mPinPosAll
     variable mTimeCompare
     variable mStatCntUs
     variable mStatCntCalls
@@ -1509,10 +2442,15 @@ proc ::mUtilMenu::CollectPageParts { pPage } {
             # anyway: three Dbo calls per pin, and the passives are most of the
             # parts on a page.  A part whose count cannot be read counts as big, so
             # a missing GetPinCount costs speed and never correctness.
+            # mPinPosAll wants every pin's position, so the filter is not
+            # consulted at all - and PartPinCount is not even called, since its
+            # only purpose is to answer a question already decided.
             set lWantPos 1
-            set lFastCnt [::mUtilMenu::PartPinCount $lPart]
-            if { $lFastCnt >= 0 && $lFastCnt <= $mRule4MinPins } {
-                set lWantPos 0
+            if { !$mPinPosAll } {
+                set lFastCnt [::mUtilMenu::PartPinCount $lPart]
+                if { $lFastCnt >= 0 && $lFastCnt <= $mRule4MinPins } {
+                    set lWantPos 0
+                }
             }
 
             set lPins [list]
@@ -1547,12 +2485,23 @@ proc ::mUtilMenu::CollectPageParts { pPage } {
         ::mUtilMenu::Out [format \
             "    timing: CollectPageParts %d ms - %d part(s), %d pin(s)" \
             $lMs [llength $lRows] $lPinTotal]
-        ::mUtilMenu::Out [format \
-            "              rule4 part pin count %6d ms over %5d call(s)" \
-            $lCntM $mStatCntCalls]
-        ::mUtilMenu::Out [format \
-            "              rule4 pin position   %6d ms over %5d call(s), %d pin(s) skipped" \
-            $lPosM $mStatPosCalls [expr { $lPinTotal - $mStatPosCalls }]]
+        # The label has to follow mPinPosAll: with the filter off these are not
+        # rule4's numbers any more, they are every pin on the page.
+        if { $mPinPosAll } {
+            ::mUtilMenu::Out [format \
+                "              part pin count       %6d ms over %5d call(s)  (filter off)" \
+                $lCntM $mStatCntCalls]
+            ::mUtilMenu::Out [format \
+                "              all pin positions    %6d ms over %5d call(s), %d pin(s) skipped" \
+                $lPosM $mStatPosCalls [expr { $lPinTotal - $mStatPosCalls }]]
+        } else {
+            ::mUtilMenu::Out [format \
+                "              rule4 part pin count %6d ms over %5d call(s)" \
+                $lCntM $mStatCntCalls]
+            ::mUtilMenu::Out [format \
+                "              rule4 pin position   %6d ms over %5d call(s), %d pin(s) skipped" \
+                $lPosM $mStatPosCalls [expr { $lPinTotal - $mStatPosCalls }]]
+        }
         ::mUtilMenu::Out [format \
             "              the rest of the walk %6d ms" \
             [expr { $lMs - $lCntM - $lPosM }]]
@@ -1570,10 +2519,22 @@ proc ::mUtilMenu::CollectPageParts { pPage } {
 # they were read in, so the (O) and (N) dumps of the same part line up when read
 # side by side.  mPinDetail 0 brings back the one-line "pins: A B C" list of names.
 #
-# The connection point is printed in RAW DOC UNITS whatever mCoordMode says, with
-# no rounding, because it is the number net_compare_rule4 matches against a wire
-# endpoint.  Set mCoordMode to "doc" to have the rest of the dump print in the same
-# units and the two line up by eye.
+# The connection point is printed in the SAME units as every other coordinate in
+# the dump - it goes through Coord, like the part's own location, the symbols, the
+# nets and the buses - and the column heading says which units those are:
+#
+#   (in)   mCoordMode "user", the default: doc integers divided by the page's
+#          physical granularity, mCoordDecimals places.  A pin the database holds
+#          at (680,750) prints as (6.800,7.500), which is the same point the Nets
+#          section prints for the wire that lands on it.
+#   (doc)  mCoordMode "doc", or a page that would not give a granularity: raw
+#          internal integers, which is what net_compare_rule4 matches against a
+#          wire endpoint.  Set mCoordMode to "doc" to read the dump in rule4's
+#          units.
+#
+# Only the PRINTOUT converts.  Element 4 of the pin record stays raw doc, so the
+# netlist compare and the markers it draws are untouched either way - see
+# PinPosStr.
 #
 # "-" means there is no position on the record, which is one of three things, in
 # order of how often it happens:
@@ -1584,8 +2545,14 @@ proc ::mUtilMenu::CollectPageParts { pPage } {
 #   GetOffsetHotSpot did not work on this pin - the only case that would stop rule4
 #     marking something it should have marked.  Tell the two apart by the part: a
 #     "-" on a big IC's connected pin is the one worth chasing.
-proc ::mUtilMenu::PrintPartRows { pRows } {
+#
+# pPage is the page the rows came off, and is only used to convert those pin
+# positions; "" prints them raw.  It comes first so the proc name and the page
+# can be handed to DumpPageInfoOn's section table as one command prefix.
+proc ::mUtilMenu::PrintPartRows { pPage pRows } {
     variable mPinDetail
+
+    set lUnits "([::mUtilMenu::CoordUnitLabel $pPage])"
 
     foreach lRow [lsort -dictionary -index 0 $pRows] {
         ::mUtilMenu::Out [format "    %-10s %-12s %-16s %s" \
@@ -1600,17 +2567,17 @@ proc ::mUtilMenu::PrintPartRows { pRows } {
         set lInfo [lindex $lRow 10]
 
         if { $mPinDetail && [llength $lInfo] > 0 } {
-            ::mUtilMenu::Out [format "               pins (%d):   Pin Number  Pin Name             Pin Pos (doc)     Connection" \
-                      [llength $lInfo]]
+            # The position column is 20 wide rather than the old 17, so that it
+            # still holds the widest thing it can be asked to print: four digits
+            # of inches either side of the comma, or mCoordDecimals raised to 3 on
+            # a granularity-1000 page.
+            ::mUtilMenu::Out [format "               pins (%d):   Pin Number  Pin Name             Pin Pos %-13s Connection" \
+                      [llength $lInfo] $lUnits]
             foreach lPin [lsort -dictionary -index 1 $lInfo] {
-                set lAt "-"
-                if { [llength [lindex $lPin 4]] == 2 } {
-                    set lAt "([lindex [lindex $lPin 4] 0],[lindex [lindex $lPin 4] 1])"
-                }
-                ::mUtilMenu::Out [format "                           %-11s %-20s %-17s %s" \
+                ::mUtilMenu::Out [format "                           %-11s %-20s %-20s %s" \
                           [::mUtilMenu::OrDash [lindex $lPin 1]] \
                           [::mUtilMenu::OrDash [lindex $lPin 0]] \
-                          $lAt \
+                          [::mUtilMenu::PinPosStr $pPage $lPin] \
                           [::mUtilMenu::PinConnStr $lPin]]
             }
         } elseif { [llength $lPins] > 0 } {
@@ -1621,7 +2588,7 @@ proc ::mUtilMenu::PrintPartRows { pRows } {
 }
 
 proc ::mUtilMenu::DumpPageParts { pPage } {
-    return [::mUtilMenu::PrintPartRows [::mUtilMenu::CollectPageParts $pPage]]
+    return [::mUtilMenu::PrintPartRows $pPage [::mUtilMenu::CollectPageParts $pPage]]
 }
 
 #-----------------------------------------------------------------------------
@@ -3017,11 +3984,20 @@ proc ::mUtilMenu::RefListStr { pRefs pMax } {
 #   2 position    GetLocation + bounding box, as ObjLocStr prints it
 #   3 connection  the net the symbol is attached to, "" when it is attached to
 #                 nothing - SymbolConn
+#   4 docLoc      the same GetLocation as raw doc integers {x y}, or {}
+#   5 docBBox     the symbol's bounding box as raw doc integers, or {} - what
+#                 MarkGridFindings draws its box on
 #
 # Element 3 is the one added for the connection listing.  SymbolSigs still builds
 # its signature out of elements 0-2 only, so PageComp's Symbols diff is exactly
 # what it was; the connection is a listing, not a new difference.  Refcompare is
 # the compare that does look at it - see DumpRefSymbolCompare.
+#
+# Elements 4 and 5 are the same relationship elements 9 and 10 have on a part row
+# and element 3 on a bus row: the printed column has been through Coord and is
+# rounded, so anything that has to MEASURE or DRAW with it reads the unrounded
+# integers instead.  Search_Missing_connection_onGrid and MarkGridFindings are the
+# two that do.
 #
 # Capture keeps power and ground in the same bucket - both are DBGLOBAL objects
 # off NewGlobalsIter (orPrmDboStreamer.tcl:1721,1870) - so there is no flag to
@@ -3049,7 +4025,9 @@ proc ::mUtilMenu::CollectPageSymbols { pPage } {
         while { $lObj != $lNullObj } {
             lappend lRows [list OFFPAGE [::mUtilMenu::CStr $lObj GetName] \
                                 [::mUtilMenu::ObjLocStr $pPage $lObj $lStatus] \
-                                [::mUtilMenu::SymbolConn $lObj $lStatus lNetCache]]
+                                [::mUtilMenu::SymbolConn $lObj $lStatus lNetCache] \
+                                [::mUtilMenu::ObjLocDoc $lObj $lStatus] \
+                                [::mUtilMenu::ObjBBoxDoc $lObj]                                 [::mUtilMenu::SymHotSpotDoc $lObj $lStatus]]
             set lObj [$lIter NextOffPageConnector $lStatus]
         }
         catch { delete_DboPageOffPageConnectorsIter $lIter }
@@ -3066,7 +4044,9 @@ proc ::mUtilMenu::CollectPageSymbols { pPage } {
             }
             lappend lRows [list GLOBAL $lName \
                                 [::mUtilMenu::ObjLocStr $pPage $lObj $lStatus] \
-                                [::mUtilMenu::SymbolConn $lObj $lStatus lNetCache]]
+                                [::mUtilMenu::SymbolConn $lObj $lStatus lNetCache] \
+                                [::mUtilMenu::ObjLocDoc $lObj $lStatus] \
+                                [::mUtilMenu::ObjBBoxDoc $lObj]                                 [::mUtilMenu::SymHotSpotDoc $lObj $lStatus]]
             set lObj [$lIter NextGlobal $lStatus]
         }
         catch { delete_DboPageGlobalsIter $lIter }
@@ -3078,7 +4058,9 @@ proc ::mUtilMenu::CollectPageSymbols { pPage } {
         while { $lObj != $lNullObj } {
             lappend lRows [list PORT [::mUtilMenu::CStr $lObj GetName] \
                                 [::mUtilMenu::ObjLocStr $pPage $lObj $lStatus] \
-                                [::mUtilMenu::SymbolConn $lObj $lStatus lNetCache]]
+                                [::mUtilMenu::SymbolConn $lObj $lStatus lNetCache] \
+                                [::mUtilMenu::ObjLocDoc $lObj $lStatus] \
+                                [::mUtilMenu::ObjBBoxDoc $lObj]                                 [::mUtilMenu::SymHotSpotDoc $lObj $lStatus]]
             set lObj [$lIter NextPort $lStatus]
         }
         catch { delete_DboPagePortsIter $lIter }
@@ -3092,13 +4074,45 @@ proc ::mUtilMenu::CollectPageSymbols { pPage } {
 #
 # The connection column is appended when the row carries element 3 and
 # mSymConnDetail is on; a row without it prints exactly as it always did.
-proc ::mUtilMenu::PrintSymbolRows { pRows } {
+# pPage first, and before pRows, because DumpPageInfoOn invokes this as a command
+# PREFIX with the page already bound - the same shape PrintPartRows has, for the
+# same reason.  It is optional so a bare "PrintSymbolRows $rows" from the Command
+# Window still works; without a page there is nothing to convert doc units with,
+# so the connection point is simply not printed.
+proc ::mUtilMenu::PrintSymbolRows { args } {
+    set pPage ""
+    set pRows [lindex $args end]
+    if { [llength $args] > 1 } {
+        set pPage [lindex $args 0]
+    }
+
     variable mSymConnDetail
 
     foreach lRow [lsort -dictionary -index 0 [lsort -dictionary -index 1 $pRows]] {
         set lLine [format "    %-8s %-26s %s" \
                        [lindex $lRow 0] [::mUtilMenu::OrDash [lindex $lRow 1]] \
                        [lindex $lRow 2]]
+
+        # The connection point, in the same units the rest of the line is in, and
+        # named with the reading SymHotSpotDoc settled on - "conn (19.95,12.50)
+        # via GetHotSpot" says both where the wire lands and how that was worked
+        # out.  Only printed when it is NOT the placement origin, because when
+        # the two coincide the line already has the number once.
+        set lHot [lindex $lRow 6]
+        if { [llength $lHot] >= 2 && $pPage ne "" } {
+            set lLoc [lindex $lRow 4]
+            if { [llength $lLoc] != 2
+                 || [lindex $lHot 0] != [lindex $lLoc 0]
+                 || [lindex $lHot 1] != [lindex $lLoc 1] } {
+                append lLine [format "  conn (%s,%s)" \
+                    [::mUtilMenu::Coord $pPage [lindex $lHot 0]] \
+                    [::mUtilMenu::Coord $pPage [lindex $lHot 1]]]
+                if { [lindex $lHot 2] ne "" } {
+                    append lLine " via [lindex $lHot 2]"
+                }
+            }
+        }
+
         if { $mSymConnDetail && [llength $lRow] > 3 } {
             append lLine "\n                 -> [::mUtilMenu::ConnStr 0 [lindex $lRow 3]]"
         }
@@ -3108,7 +4122,7 @@ proc ::mUtilMenu::PrintSymbolRows { pRows } {
 }
 
 proc ::mUtilMenu::DumpPageSymbols { pPage } {
-    return [::mUtilMenu::PrintSymbolRows [::mUtilMenu::CollectPageSymbols $pPage]]
+    return [::mUtilMenu::PrintSymbolRows $pPage [::mUtilMenu::CollectPageSymbols $pPage]]
 }
 
 # Bus and bundle wires.  Returns rows of {name type endpoints docSeg}.
@@ -3173,21 +4187,126 @@ proc ::mUtilMenu::DumpPageBuses { pPage } {
     return [::mUtilMenu::PrintBusRows [::mUtilMenu::CollectPageBuses $pPage]]
 }
 
-# Nets on one page.  Returns rows of {name {endpoints...} {docSegs...}}.
+# Is this page DboNet a BUS (or a bundle) rather than an ordinary scalar net?
+#
+# DboPageNetsIter with IterDefs_ALL hands back every net on the page, and a bus is
+# a net - so a bus's wires were being listed twice, once under Nets from this walk
+# and again under Buses from the page-wires walk that CollectPageBuses does.  Same
+# coordinates, two sections, and Nets is the one that has no business printing
+# them: everything downstream of it treats a row as a signal.
+#
+# The test is the object's own type, the same way CollectPageBuses tests a wire -
+# just at the net level and the other way round:
+#
+#   DboBaseObject_NET_BUS      D[0..7] and friends
+#   DboBaseObject_NET_BUNDLE   a bundle
+#
+# Bus MEMBERS are not caught by this and must not be: D[0] is a scalar net that
+# happens to belong to a bus, it carries real connectivity, and the Nets section
+# is where it belongs.
+#
+# Two things are deliberately NOT done here:
+#
+#   IterDefs_SCALARS   there is a mode argument on DboPageNetsIter that would skip
+#                      bus nets without visiting them (new_DboPageNetsIter source
+#                      mode), and Cadence uses its sibling IterDefs_BUSES that way
+#                      in capISCFExport/tcl/capDesignPhysicalViewReader.tcl:1071.
+#                      But no shipped script calls IterDefs_SCALARS, so what it
+#                      selects is unverified - and a mode that turned out to mean
+#                      something slightly different would silently DROP nets.
+#                      Testing the type costs one call per net and cannot.
+#   trusting the constants  a missing DboBaseObject_NET_BUS makes this answer "not
+#                      a bus", so the net is KEPT.  Printing a bus twice is a
+#                      cosmetic fault; dropping a signal net is a real one, and an
+#                      unreadable constant must not be able to cause the second.
+proc ::mUtilMenu::IsBusNet { pNet } {
+    set lOT ""
+    if { [catch { set lOT [$pNet GetObjectType] }] || $lOT eq "" } {
+        return 0
+    }
+
+    foreach lVar { ::DboBaseObject_NET_BUS ::DboBaseObject_NET_BUNDLE } {
+        if { [info exists $lVar] && $lOT eq [set $lVar] } {
+            return 1
+        }
+    }
+    return 0
+}
+
+# Is this DboWire a BUS wire rather than an ordinary signal wire?  Same test
+# CollectPageBuses uses to FIND buses, so the two are exact complements: a wire
+# this says yes to is a wire that section is already printing.
+#
+# This is the one that matters, and IsBusNet on its own was not enough.  Skipping
+# bus NET objects only removes the bus's own entry from the list; it does nothing
+# about the far bigger problem, which is that a bus MEMBER carries the bus's wires
+# in its own wire list.  DboNet::NewWiresIter on V_M_BMC_DDR4_DQ0 returns the one
+# scalar wire that runs from the pin to the bus AND all seventeen wires of the bus
+# it then travels along - and so does DQ1, and DQ2, and every other member.  On a
+# real DDR page that came to 482 of 835 wire lines being the same bus repeated,
+# one segment claimed by sixteen different nets.
+#
+# The damage was not just a long dump.  Sixteen nets all reporting an endpoint at
+# the same coordinate, all tagged NET and each in its own group, is sixteen nets
+# that "should have been one net" as far as Search_Missing_connection_onGrid is
+# concerned - see the distance-0 rule, which keeps a zero gap as a finding when
+# both sides are NET.  That page produced 400 "two nets that did not merge"
+# findings, every one of them a bus doing exactly what a bus is supposed to do.
+#
+# Fail-safe the same way as IsBusNet: anything unreadable answers "not a bus", so
+# a wire is kept.  A bus wire listed under Nets is noise; a signal wire dropped
+# from Nets is a missing connection nobody will ever be told about.
+proc ::mUtilMenu::IsBusWire { pWire } {
+    set lOT ""
+    if { [catch { set lOT [$pWire GetObjectType] }] || $lOT eq "" } {
+        return 0
+    }
+
+    foreach lVar { ::DboBaseObject_WIRE_BUS ::DboBaseObject_WIRE_BUNDLE } {
+        if { [info exists $lVar] && $lOT eq [set $lVar] } {
+            return 1
+        }
+    }
+    return 0
+}
+
+# Nets on one page.  Returns rows of
+# {name {endpoints...} {docSegs...} schematicName}.
 #
 # Element 2 is the same wires again as {x1 y1 x2 y2} doc-unit quads, in the same
 # order as element 1 before it was sorted for printing.  Only the marker lines use
 # it; printing and the signatures stay on elements 0 and 1.
+#
+# Element 3 is what the whole schematic calls this net - see SchNetName - and is
+# "" when the net has no schematic net or mNetShowSchName is off.  It is on the
+# END of the row on purpose: element 0 is still the page label, so every existing
+# reader (NetSig, NetsByName, GridNetGroup, the netlist rules) keeps indexing the
+# same elements and sees the same values.  Only PrintNetRows looks at element 3.
+#
+# Buses are skipped - see IsBusNet and mNetSkipBuses.  IterDefs_ALL is still what
+# the iterator is asked for, so bus MEMBERS keep coming through; it is the bus
+# object itself that is dropped, because CollectPageBuses already lists its wires.
 proc ::mUtilMenu::CollectPageNets { pPage } {
-    set lStatus  [DboState]
-    set lNullObj NULL
-    set lRows    [list]
+    variable mNetShowSchName
+    variable mNetSkipBuses
+
+    set lStatus   [DboState]
+    set lNullObj  NULL
+    set lRows     [list]
+    set lSkipped  0
+    set lBusWires 0
 
     set lNetsIter [::mUtilMenu::NextIterName Nets]
     DboPageNetsIter $lNetsIter $pPage $::IterDefs_ALL
     set lNet [$lNetsIter NextNet $lStatus]
 
     while { $lNet != $lNullObj } {
+        if { $mNetSkipBuses && [::mUtilMenu::IsBusNet $lNet] } {
+            incr lSkipped
+            set lNet [$lNetsIter NextNet $lStatus]
+            continue
+        }
+
         set lNames [list]
         set lSegs  [list]
         set lDocs  [list]
@@ -3196,6 +4315,14 @@ proc ::mUtilMenu::CollectPageNets { pPage } {
         set lWiresIter [$lNet NewWiresIter $lStatus]
         set lWire      [$lWiresIter NextWire $lStatus]
         while { $lWire != $lNullObj } {
+            # The bus wires a member net travels along belong to the Buses
+            # section, not to this net - see IsBusWire.  Skipped before the
+            # aliases as well, so a member cannot be named after its bus.
+            if { $mNetSkipBuses && [::mUtilMenu::IsBusWire $lWire] } {
+                incr lBusWires
+                set lWire [$lWiresIter NextWire $lStatus]
+                continue
+            }
             lappend lSegs [::mUtilMenu::WireSegStr $pPage $lWire $lStatus]
             set lDoc [::mUtilMenu::WireSegDoc $lWire $lStatus]
             if { [llength $lDoc] == 4 } {
@@ -3210,22 +4337,65 @@ proc ::mUtilMenu::CollectPageNets { pPage } {
         }
         catch { delete_DboNetWiresIter $lWiresIter }
 
+        set lSchName ""
+        if { $mNetShowSchName } {
+            set lSchName [::mUtilMenu::SchNetName $lNet]
+        }
+
         lappend lRows [list [::mUtilMenu::NetLabel $lNet $lNames] \
                             [lsort -dictionary $lSegs] \
-                            $lDocs]
+                            $lDocs \
+                            $lSchName]
 
         set lNet [$lNetsIter NextNet $lStatus]
     }
 
     ::mUtilMenu::DropIter $lNetsIter
     catch { $lStatus -delete }
+
+    # Said out loud, and only when it happened.  A section that quietly drops rows
+    # is a section nobody can tell apart from a page that has no buses on it, and
+    # the count is also the one number that says whether the skip is doing
+    # anything at all on this design.
+    if { $lSkipped > 0 || $lBusWires > 0 } {
+        ::mUtilMenu::Out [format \
+            "    (%d bus/bundle net(s) and %d bus wire(s) carried by member nets not listed here - see the Buses section)" \
+            $lSkipped $lBusWires]
+    }
     return $lRows
 }
 
+# The name column of one net row: the page label, plus the schematic-wide name in
+# brackets when the two are not the same.  "" and an identical name both print as
+# the bare label, so a bracket always carries information - see mNetShowSchName.
+proc ::mUtilMenu::NetLabelWithSch { pRow } {
+    set lLabel [lindex $pRow 0]
+    set lSch   [lindex $pRow 3]
+
+    if { $lSch eq "" || $lSch eq $lLabel } {
+        return $lLabel
+    }
+    return "$lLabel ($lSch)"
+}
+
+# The name column is 28 wide as it has always been, but a bracketed schematic name
+# overflows that and would push "wires:" out of line on that one row alone.  So
+# the width is the widest name actually being printed, floored at 28: a dump with
+# no renamed nets in it comes out byte for byte as before, and one with renamed
+# nets stays in a column instead of ragging.
 proc ::mUtilMenu::PrintNetRows { pRows } {
+    set lWide 28
+    foreach lRow $pRows {
+        set lLen [string length [::mUtilMenu::NetLabelWithSch $lRow]]
+        if { $lLen > $lWide } {
+            set lWide $lLen
+        }
+    }
+
     foreach lRow [lsort -dictionary -index 0 $pRows] {
         set lSegs [lindex $lRow 1]
-        ::mUtilMenu::Out [format "    %-28s wires: %d" [lindex $lRow 0] [llength $lSegs]]
+        ::mUtilMenu::Out [format "    %-${lWide}s wires: %d" \
+                              [::mUtilMenu::NetLabelWithSch $lRow] [llength $lSegs]]
         foreach lSeg $lSegs {
             ::mUtilMenu::Out "        wire $lSeg"
         }
@@ -3312,15 +4482,34 @@ proc ::mUtilMenu::DumpPageInfo { pDsnPath pSchName pPageName \
     set lPage   [::mUtilMenu::FindPage $pDsnPath $pSchName $pPageName]
     ::mUtilMenu::TimeMark "page lookup" $lT
 
+    return [::mUtilMenu::DumpPageInfoOn $lPage $pWhat]
+}
+
+# The same dump against a DboPage that is already in hand, skipping the lookup.
+# DumpPageInfo is the {design schematic page} front door onto this; Schematic
+# Check comes in here instead, because the Project Manager hands it the page
+# object itself and walking the whole design to find a page it already has would
+# be silly.
+proc ::mUtilMenu::DumpPageInfoOn { pPage {pWhat {parts symbols nets buses}} } {
     set lTotals [list]
     set lOut    [list parts [list] symbols [list] nets [list] buses [list]]
 
-    # {section dictKey heading collectProc printProc unit}
+    # {section dictKey heading collectProc printPrefix unit}
+    #
+    # Element 4 is a command PREFIX, not a bare proc name, and is invoked with
+    # {*} below: the nets and buses rows already carry their coordinates as
+    # finished text (WireSegStr converted them at collect time), but a part row
+    # keeps its pin positions as raw doc integers for net_compare_rule4 and a
+    # symbol row keeps its connection point as raw doc integers for GridEndpoints,
+    # so those two printers need the page to convert them - and the prefix is
+    # where they get it.
     set lSecs [list \
         [list parts   parts   "  Parts" \
-             ::mUtilMenu::CollectPageParts   ::mUtilMenu::PrintPartRows   "part(s)"] \
+             ::mUtilMenu::CollectPageParts \
+             [list ::mUtilMenu::PrintPartRows $pPage] "part(s)"] \
         [list symbols symbols "  Off-Page / Power / Ports" \
-             ::mUtilMenu::CollectPageSymbols ::mUtilMenu::PrintSymbolRows "symbol(s)"] \
+             ::mUtilMenu::CollectPageSymbols \
+             [list ::mUtilMenu::PrintSymbolRows $pPage] "symbol(s)"] \
         [list nets    nets    "  Nets" \
              ::mUtilMenu::CollectPageNets    ::mUtilMenu::PrintNetRows    "net(s)"] \
         [list buses   buses   "  Buses" \
@@ -3334,13 +4523,13 @@ proc ::mUtilMenu::DumpPageInfo { pDsnPath pSchName pPageName \
         ::mUtilMenu::Out [lindex $lSec 2]
 
         set lT    [::mUtilMenu::TimeNow]
-        set lRows [[lindex $lSec 3] $lPage]
+        set lRows [[lindex $lSec 3] $pPage]
         ::mUtilMenu::TimeMark "$lWhich collect" $lT
 
         set lOut [dict replace $lOut [lindex $lSec 1] $lRows]
 
         set lT [::mUtilMenu::TimeNow]
-        set lN [[lindex $lSec 4] $lRows]
+        set lN [{*}[lindex $lSec 4] $lRows]
         ::mUtilMenu::TimeMark "$lWhich print" $lT
 
         lappend lTotals "$lN [lindex $lSec 5]"
@@ -3684,13 +4873,18 @@ proc ::mUtilMenu::GetCheckedPages { pWhich } {
 }
 
 #-----------------------------------------------------------------------------
-# Result window - where Compare / Refcompare put their report.
+# Result window - where Compare / Refcompare / Schematic Check put their report.
 #
 # capDisplayMessageBox is modal and its text cannot be selected, so there was no
 # way to get the report out of it.  This is a read-only text widget: -state
 # disabled blocks editing but leaves the usual selection bindings alone, so a
 # mouse drag plus Ctrl-C works (checked against the Tk 8.6.5 that Capture ships).
-# Select All / Copy buttons are there for the same job without the drag.
+# Select All / Copy buttons are there for the same job without the drag, and Copy
+# with nothing selected takes the whole report.
+#
+# One window, rebuilt per run, shared by all three: they are three answers to the
+# same kind of question and nobody wants two of them stacked up.  What differs is
+# only what Close means, which is ShowResultWindow's pOnClose.
 #-----------------------------------------------------------------------------
 
 proc ::mUtilMenu::CloseResultWindow { } {
@@ -3742,11 +4936,24 @@ proc ::mUtilMenu::CopyResultText { } {
 }
 
 # pTitle is the window banner, pText the whole report.
-proc ::mUtilMenu::ShowResultWindow { pTitle pText } {
+#
+# pOnClose is what Close, the window's X and Escape all call.  It defaults to
+# CloseResultAndSelector, which is Schematic Compare's answer - the report and the
+# page selector that started it are one job there.  Schematic Check has no
+# selector behind it and passes CloseResultWindow instead, so its Close closes the
+# report and nothing else.  All three routes get the same command whichever it is:
+# having X and Escape mean different things would be a bug, not a feature.
+proc ::mUtilMenu::ShowResultWindow { pTitle pText {pOnClose ""} } {
     variable mResultWin
 
+    if { $pOnClose eq "" } {
+        set pOnClose "::mUtilMenu::CloseResultAndSelector"
+    }
+
     # Should not happen - the page selector is a Tk window, so Tk is already up -
-    # but fall back to the old message box rather than losing the report.
+    # but fall back to the old message box rather than losing the report.  It is a
+    # real possibility for Schematic Check, which can be started from the menu
+    # with no Tk window having been built yet.
     if { [catch { package require Tk }] } {
         catch { capDisplayMessageBox $pText $pTitle }
         return
@@ -3758,7 +4965,7 @@ proc ::mUtilMenu::ShowResultWindow { pTitle pText } {
     catch { destroy $mResultWin }
     toplevel $mResultWin
     wm title $mResultWin $pTitle
-    wm protocol $mResultWin WM_DELETE_WINDOW "::mUtilMenu::CloseResultAndSelector"
+    wm protocol $mResultWin WM_DELETE_WINDOW $pOnClose
     catch { SetAppWindowAsParent [expr { [winfo id $mResultWin] }] }
 
     set lBody $mResultWin.body
@@ -3787,9 +4994,8 @@ proc ::mUtilMenu::ShowResultWindow { pTitle pText } {
     set lBtns $mResultWin.btns
     frame $lBtns -padx 8
     pack $lBtns -side bottom -fill x
-    # Closes the page selector as well - see CloseResultAndSelector.
     button $lBtns.close  -text "Close"      -width 12 \
-        -command "::mUtilMenu::CloseResultAndSelector"
+        -command $pOnClose
     button $lBtns.copy   -text "Copy"       -width 12 \
         -command "::mUtilMenu::CopyResultText"
     button $lBtns.selall -text "Select All" -width 12 \
@@ -3802,7 +5008,7 @@ proc ::mUtilMenu::ShowResultWindow { pTitle pText } {
     # break, so the widget's own class binding for the same key does not also run.
     bind $lBody.txt <Control-a> "::mUtilMenu::SelectAllResultText ; break"
     bind $lBody.txt <Control-c> "::mUtilMenu::CopyResultText ; break"
-    bind $mResultWin <Escape>   "::mUtilMenu::CloseResultAndSelector"
+    bind $mResultWin <Escape>   $pOnClose
 
     focus $lBody.txt
     return
@@ -3900,6 +5106,25 @@ proc ::mUtilMenu::DboSet { pObj pMethod args } {
 proc ::mUtilMenu::MarkObjModified { pObj args } {
     if { $pObj eq "" || $pObj eq "NULL" } {
         return 0
+    }
+
+    # A literal NULL argument is safe on exactly ONE of these classes.
+    # DboDesign::MarkModified(DboOccurrence*) documents NULL as "no particular
+    # occurrence" and Cadence's own capReplacePathInCache.tcl:736 passes it; every
+    # other class here has overloads that dereference their argument, and
+    # DboLib alone has nine of them.  Handing NULL to one of those is an access
+    # violation inside the DLL - Capture disappears, and the catch below never
+    # runs, because there is no Tcl error to catch.
+    #
+    # SWIG names a pointer's Tcl handle after the DECLARED type, so the handle
+    # itself says which class this call will land in - the same "_p_Dbo<Class>"
+    # suffix PMItemDboClass reads off the Project Manager's labels.  Anything that
+    # is not plainly a DboDesign gets the no-argument form instead.
+    if { [lsearch -exact $args NULL] != -1 } {
+        if { [::mUtilMenu::PMItemDboClass $pObj] ne "DboDesign" } {
+            ::mUtilMenu::Trace "MarkModified NULL is only safe on DboDesign, not on $pObj - using the no-argument form"
+            set args [list]
+        }
     }
 
     foreach lArgs [list $args [list]] {
@@ -4200,33 +5425,82 @@ proc ::mUtilMenu::MarkPageNameChanged { pFile pPair } {
     }
 
     set lObjs [::mUtilMenu::FindPageObjs $pFile $lSchName $lPageName]
-    set lSch  [lindex $lObjs 0]
-    set lPage [lindex $lObjs 1]
+    return [::mUtilMenu::StarPageObj [lindex $lObjs 0] [lindex $lObjs 1]]
+}
 
-    set lNew   "*$lPageName"
-    set lCStr  [DboTclHelper_sMakeCString $lNew]
-    set lOK    0
+# The rename itself, from the objects rather than from {file schematic page}.
+#
+# Schematic Check already holds the DboPage it just checked - the Project Manager
+# handed it over, or the walk over the design produced it - so re-finding it by
+# name would be a second walk of the design per page, and on a 100-page design
+# that is 100 walks.  MarkPageNameChanged keeps the by-name door open for the
+# compare, which only ever has names.
+#
+# WHERE THE DESIGN COMES FROM, AND WHY IT IS NOT GetContainingLib.
+#
+# DboPage::GetContainingLib is declared to return DboLib* (checked in
+# orDb_Dll_Tcl64.dll: ?GetContainingLib@DboBaseObject@@UEAAPEAVDboLib@@XZ), and
+# SWIG types the Tcl handle by the DECLARED type, not by the object behind it.  So
+# a handle from GetContainingLib dispatches into DboLib's methods even though the
+# object really is a DboDesign - and DboLib::MarkModified has NINE overloads, none
+# of which takes a null pointer:
+#
+#   DboLib::MarkModified(DboCell* / DboView* / DboLibPart* / DboSymbol* /
+#                        DboPackage* / DboGraphicObject* / DboLibObject* /
+#                        DboExportBlock* / CString&, DboDirectory*)
+#   DboDesign::MarkModified(DboOccurrence*)      <- the one that accepts NULL
+#
+# "MarkModified NULL" on that handle therefore hands a null pointer to one of the
+# nine, which dereferences it inside the DLL and takes Capture down with it - an
+# access violation, not a Tcl error, so catch cannot save it.  That is exactly what
+# this proc did when it first passed the lib straight to MarkObjModified.
+#
+# So the design is resolved the way MarkPageNameChanged always resolved it - by
+# name, through the session, which returns a properly typed DboDesign* - and only
+# that handle is ever given a NULL.  The lib is still used for the fallback rename,
+# where a real page pointer is the argument and DboLib::RenameObject(DboBaseObject*,
+# CString&) is a genuine overload.
+#
+# Returns 1 when the page came back with the new name, 0 otherwise - including
+# when it was already marked, which is not a failure and not a second '*'.
+proc ::mUtilMenu::StarPageObj { pSch pPage } {
+    set lPageName [::mUtilMenu::CStr $pPage GetName]
+    if { [string index $lPageName 0] eq "*" } {
+        ::mUtilMenu::Trace "page $lPageName is already marked - left alone"
+        return 0
+    }
 
-    if { [::mUtilMenu::DboSet $lSch Rename $lPage $lCStr] } {
-        set lOK 1
-    } else {
-        # Fall back to the design-level rename, same (pObj newName) shape.
-        set lSession $::DboSession_s_pDboSession
-        DboSession -this $lSession
-        set lStatus [DboState]
-        set lPath   [DboTclHelper_sMakeCString [file normalize $pFile]]
-        set lDesign [$lSession GetDesignAndSchematics $lPath $lStatus]
-        catch { $lStatus -delete }
-        if { $lDesign ne "NULL" \
-             && [::mUtilMenu::DboSet $lDesign RenameObject $lPage $lCStr] } {
-            set lOK 1
+    set lNew  "*$lPageName"
+    set lCStr [DboTclHelper_sMakeCString $lNew]
+
+    # The containing lib, as a DboLib handle - fine for RenameObject, never for
+    # MarkModified NULL.  See above.
+    set lLib ""
+    catch { set lLib [$pPage GetContainingLib] }
+
+    # The same lib as a DboDesign, via the session.  DboLib::GetName is the
+    # design's file name, which is the string GetDesignAndSchematics is keyed on.
+    set lDesign ""
+    if { $lLib ne "" && $lLib ne "NULL" } {
+        set lPath [::mUtilMenu::CStr $lLib GetName]
+        if { $lPath ne "" } {
+            catch { set lDesign [::mUtilMenu::FindDesign $lPath] }
         }
+    }
+
+    set lDone 0
+    if { $pSch ne "" && $pSch ne "NULL" } {
+        set lDone [::mUtilMenu::DboSet $pSch Rename $pPage $lCStr]
+    }
+    if { !$lDone && $lLib ne "" && $lLib ne "NULL" } {
+        # Fall back to the design-level rename, same (pObj newName) shape.
+        ::mUtilMenu::DboSet $lLib RenameObject $pPage $lCStr
     }
 
     # Believe the page, not the return code: whatever the DboState said, the name
     # either changed or it did not.
-    if { [::mUtilMenu::CStr $lPage GetName] ne $lNew } {
-        ::mUtilMenu::Trace "rename failed: $lSchName / $lPageName -> $lNew"
+    if { [::mUtilMenu::CStr $pPage GetName] ne $lNew } {
+        ::mUtilMenu::Trace "rename failed: $lPageName -> $lNew"
         return 0
     }
 
@@ -4234,10 +5508,108 @@ proc ::mUtilMenu::MarkPageNameChanged { pFile pPair } {
     # MarkObjModified, which is where the three different shapes are written down.
     # The design one is the reason that proc exists: it wants an occurrence, so the
     # bare call this used to make never reached the database at all.
-    ::mUtilMenu::MarkObjModified $lPage
-    ::mUtilMenu::MarkObjModified $lSch $lPage
-    catch { ::mUtilMenu::MarkObjModified [::mUtilMenu::FindDesign $pFile] NULL }
+    ::mUtilMenu::MarkObjModified $pPage
+    if { $pSch ne "" && $pSch ne "NULL" } {
+        ::mUtilMenu::MarkObjModified $pSch $pPage
+    }
+    if { $lDesign ne "" && $lDesign ne "NULL" } {
+        catch { ::mUtilMenu::MarkObjModified $lDesign NULL }
+    } elseif { $lLib ne "" && $lLib ne "NULL" } {
+        # No DboDesign to be had - mark the lib with the ONLY shape that is safe
+        # on it, which is the inherited no-argument one.
+        catch { ::mUtilMenu::MarkObjModified $lLib }
+    }
     return 1
+}
+
+#-----------------------------------------------------------------------------
+# Every design the session is holding - i.e. what is open
+#
+# DboSession::NewDesignsIter, which is how both of Cadence's own "do this to all
+# the open designs" procs do it:
+#
+#   capDemoBrowser/tcl/OrHandlerCapDemoBrowser.tcl:288   GetOpenDesigns
+#   capFindAndReplace/tcl/capDesignUtil.tcl:961          reevaluateAllPagesOfOpenDesigns
+#
+#   DboSession_NewDesignsIter        self status   -> DboSessionDesignsIter
+#   DboSessionDesignsIter_NextDesign self status   -> DboDesign
+#   delete_DboSessionDesignsIter
+#
+# Returns rows of {path rootName modified}.  path is DboLib::GetName, which for a
+# design is its .DSN file - the same getter DesignPathOf uses.
+#
+# Two things this is NOT:
+#
+#   It is not a list of .OPJ files.  A .OPJ is Capture's project wrapper and not a
+#   DBO object at all, so nothing in the database can be asked about it - Appendix
+#   A has GetActiveOpjName() (the active one only) and CloseProject(), and that is
+#   the whole of it.  capDemoBrowser guesses the .OPJ by string-replacing .DSN,
+#   which is right for most projects and wrong for any that does not keep the two
+#   side by side under the same name.  This does not guess; callers that want to
+#   can, and DumpSessionDesigns shows the guess next to the real answer for the
+#   active project so it can be checked.
+#
+#   It is not exactly "what PROJECT_MANAGER_VIEW has open" either.  A design put
+#   into the session by Tcl - which is what Open(pPath) does, and what Schematic
+#   Compare does to both of its .DSNs - is in here whether or not it has a Project
+#   Manager window.  There is no way to ask the database about windows.
+#
+# Deliberately does NOT reuse lStatus for GetName's return value.  The shipped
+# capDesignUtil.tcl:965 does (set lStatus [$lDesign GetName $lName]) and thereby
+# overwrites the DboState the iterator is being driven with; it works by luck.
+# CStr keeps the two apart.
+#-----------------------------------------------------------------------------
+proc ::mUtilMenu::SessionDesigns { } {
+    set lOut [list]
+
+    if { [catch {
+        set lSession $::DboSession_s_pDboSession
+        DboSession -this $lSession
+        set lStatus [DboState]
+
+        set lIter   [$lSession NewDesignsIter $lStatus]
+        set lDesign [$lIter NextDesign $lStatus]
+        while { $lDesign != "NULL" } {
+            set lPath [::mUtilMenu::CStr $lDesign GetName]
+            set lRoot [::mUtilMenu::CStr $lDesign GetRootName]
+            set lMod  "?"
+            catch { set lMod [$lDesign IsModified $lStatus] }
+            if { $lPath ne "" } {
+                lappend lOut [list $lPath $lRoot $lMod]
+            }
+            set lDesign [$lIter NextDesign $lStatus]
+        }
+        catch { delete_DboSessionDesignsIter $lIter }
+        catch { $lStatus -delete }
+    } lErr] } {
+        ::mUtilMenu::Trace "SessionDesigns failed -> $lErr"
+    }
+    return $lOut
+}
+
+# The same list, printed.  Run in the Command Window:
+#   ::mUtilMenu::DumpSessionDesigns
+proc ::mUtilMenu::DumpSessionDesigns { } {
+    set lRows [::mUtilMenu::SessionDesigns]
+
+    ::mUtilMenu::Out [::mUtilMenu::Banner "--- designs in the session ---"]
+    set lN 0
+    foreach lRow $lRows {
+        incr lN
+        set lPath [lindex $lRow 0]
+        ::mUtilMenu::Out [format "  %d  %s" $lN $lPath]
+        ::mUtilMenu::Out [format "     root=%s  modified=%s  opj(guessed)=%s" \
+            [::mUtilMenu::OrDash [lindex $lRow 1]] [lindex $lRow 2] \
+            "[file rootname $lPath].opj"]
+    }
+    ::mUtilMenu::Out "  ($lN design(s))"
+
+    set lOpj "ERROR / not available"
+    catch { set lOpj [GetActiveOpjName] }
+    ::mUtilMenu::Out "  GetActiveOpjName -> [::mUtilMenu::OrDash $lOpj]"
+    set lInfo [::mUtilMenu::ActivePMDesignInfo]
+    ::mUtilMenu::Out "  active PM design -> [::mUtilMenu::OrDash [lindex $lInfo 0]]"
+    return $lN
 }
 
 # The DboDesign one .DSN path maps to, or NULL.  Same two lines as the walk in
@@ -5037,21 +6409,521 @@ proc ::mUtilMenu::DoSchematicCompare { pVia } {
     return true
 }
 
-# capCloseChildViewsExceptCurrent() - documented on p.136 of the Tcl/Tk PDF.
-proc ::mUtilMenu::DoClosePage { pVia } {
-    ::mUtilMenu::Trace "Close Page callback reached via $pVia"
+#-----------------------------------------------------------------------------
+# Close Page - shut every open schematic page, across every open design
+#
+# This used to be capCloseChildViewsExceptCurrent(): "Close All Tabs But This",
+# which leaves whichever page happens to be on top open.  What is wanted is every
+# page of every .DSN / .OPJ the Project Manager has open, and Appendix A has the
+# command for it - p.141, right next to the one that was already being used:
+#
+#   capCloseChildViews(pExclude = None)     pExclude: CDocument *
+#   capCloseChildViews()
+#
+# and both forms are real: Cadence's own capAutoLoad/capCloseAllChildWindows.tcl:8
+# registers the no-argument form as the handler for OnCloseChildWindows, which is
+# Window > Close All.
+#
+# The catch is what "child view" covers.  The Project Manager is itself an MDI
+# child of the Capture frame, so "close all child views" may well take the project
+# tree down with the pages - and closing the Project Manager closes the project.
+# That is not what "close the pages" is supposed to mean, so it is excluded:
+# GetActivePM() (p.130) returns the COrCapturePMDoc, and that is what pExclude
+# wants.  If it turns out the Project Manager was never in scope, the argument
+# names a document that was not going to be closed anyway and nothing changes -
+# so this is the safe move whichever way the command actually behaves.
+#
+# But pExclude protects ONE document, and GetActivePM only ever names the ACTIVE
+# project's.  With two projects open that closed the other one's Project Manager
+# along with the pages.  The answer is to do it a project at a time -
+# ClosePagesPerDesign, over what SessionDesigns reports - which is also the
+# closest this API gets to "close the pages one by one": Appendix A has no
+# per-page close at all, only whole-frame ones.
+#
+# mClosePageMode picks between the four - see the variable.
+#
+# EnableAllWindowCloseMenu() (p.136) is Capture's own "is there anything to close"
+# test, the same one the shipped script wires to OnUpdateCloseChildWindows.  It is
+# only used for the Command Window line here - the close is attempted either way,
+# because a getter that will not answer is not a reason to refuse to do the work.
+#-----------------------------------------------------------------------------
+# Which no-argument getter to ask for the document to EXCLUDE, in order.
+#
+# The first version of this passed GetActivePM() and every single call failed with
+#
+#   No matching function for overloaded 'capCloseChildViews'
+#
+# which is SWIG saying the argument is the wrong type, not that the command is
+# missing.  capCloseChildViews declares
+#
+#   in method 'capCloseChildViews', argument 1 of type 'CDocument *'
+#
+# and Capture.exe registers _p_CDocument, _p_COrCapturePMDoc and _p_COrSchematicDoc
+# as three SEPARATE swig types with no conversion between them.  GetActivePM
+# returns a COrCapturePMDoc, so it can never be that argument - the pointer is
+# right, the type tag on it is not.  Every design therefore fell through to
+# capCloseChildViewsExceptCurrent, which is why one page stayed open on each.
+#
+# The two below return a CDocument, which is the declared type:
+#
+#   capGetActivePMDoc      no arguments - the Project Manager's document
+#   capGetActiveDocument   no arguments - whatever document is on top (p.136)
+#
+# WHAT DumpCloseApi ACTUALLY REPORTED, on a real 17.4 with a project open:
+#
+#   capGetActiveDocument          _c01b5536..._p_COrCapturePMDoc
+#   capGetActivePMDoc             _e0395536..._p_COrCapturePMDoc
+#   capGetActiveView              _c00b9a56..._p_CView
+#   capGetActiveWindow            _10b06f9a..._p_CWnd
+#   capGetActiveDocumentPathName  (empty)
+#   capGetActiveDocumentTitle     W980_WS : P05. SA PHASE 1-2 80A*a1
+#   GetActivePM                   _e0395536..._p_COrCapturePMDoc
+#
+# Three things fall out of that, and together they kill the exclude approach:
+#
+#   BOTH getters hand back a COrCapturePMDoc.  capGetActivePMDoc is not a
+#   differently-typed wrapper - it is literally the same pointer as GetActivePM.
+#   Nothing reachable from Tcl produces the _p_CDocument that pExclude wants, so
+#   capCloseChildViews' one-argument form cannot be called from Tcl at all.
+#
+#   The active DOCUMENT is the project while the active VIEW is a page - the
+#   title is "W980_WS : P05...", a page, and capGetActiveView is a separate CView.
+#   So Capture keeps ONE COrCapturePMDoc per project and every page window is a
+#   view of it.
+#
+#   Which means the exclude form was the wrong idea even if it had compiled:
+#   "close all child views except this document's" applied to the project's own
+#   document would have closed nothing.  The pages ARE that document's views.
+#
+# So the pages are closed with the NO-ARGUMENT capCloseChildViews - Cadence's own
+# capCloseAllChildWindows.tcl:8 registers exactly that as Window > Close All - and
+# the Project Manager is protected the other way round: if closing the views takes
+# the project tree with it, ClosePagesPerDesign opens the project again
+# afterwards.  Restoring something is safe in a way that guessing a pointer type
+# is not, and Open on a project that never closed just activates it.
+#
+# The exclude getters are still tried first, from mClosePageDocGetters, because
+# they cost one failed call and a different Capture build may register the cast.
+#
+# One close call, by name.  Returns 1 if the command ran, 0 if it refused.
+#
+# "exclude" is NOT in the default route list any more, and the reason is worth
+# keeping: it does not throw, it succeeds and does nothing.  A real run reported
+#
+#   1/3  W890D8-2L2T.DSN - 200 round(s), pages MAY REMAIN (exclude)
+#
+# 200 rounds of a call that returned success and closed not one window, on all
+# three projects.  That is the document model doing exactly what was written down
+# two procs up and then not acted on: every page window is a VIEW of the
+# project's own COrCapturePMDoc, so "close all child views except this
+# document's" excludes the very views it was supposed to close.  Trying it first
+# meant the working routes were never reached.
+#
+# It is left reachable through mClosePageRoutes because a Capture that maps the
+# argument to something else would want it - but it has to be last, and it is not
+# in the default.
+proc ::mUtilMenu::ClosePagesVia { pRoute } {
+    variable mClosePageDocGetters
 
-    if { [catch { capCloseChildViewsExceptCurrent } lErr] } {
-        ::mUtilMenu::Trace "Close Page failed -> $lErr"
+    switch -- $pRoute {
+        all {
+            return [expr { ![catch { capCloseChildViews }] }]
+        }
+        exceptcurrent {
+            return [expr { ![catch { capCloseChildViewsExceptCurrent }] }]
+        }
+        exclude {
+            foreach lGetter $mClosePageDocGetters {
+                if { [info commands $lGetter] eq "" } {
+                    continue
+                }
+                set lDoc ""
+                if { [catch { set lDoc [$lGetter] }] || $lDoc eq "" || $lDoc eq "NULL" } {
+                    continue
+                }
+                if { ![catch { capCloseChildViews $lDoc }] } {
+                    return 1
+                }
+            }
+            return 0
+        }
     }
+    return 0
+}
+
+# Something that changes when a window actually closes.
+#
+# EnableAllWindowCloseMenu is a BOOLEAN - it says "something is still open", not
+# how much - so it cannot tell "closing one page per call" apart from "doing
+# nothing at all".  That is what let the exclude route spin 200 times.
+#
+# capGetActiveDocumentTitle moves whenever the active view does, and closing a
+# window always changes which view is active, so a title that has not moved after
+# a close means nothing closed.  On the real machine it reads
+# "W980_WS : P05. SA PHASE 1-2 80A*a1" - the design and the page - which is
+# exactly the granularity needed.
+proc ::mUtilMenu::CloseProgressToken { } {
+    set lT ""
+    catch { set lT [capGetActiveDocumentTitle] }
+    if { $lT eq "" } {
+        catch { set lT [capGetActiveDocumentPathName] }
+    }
+    return $lT
+}
+
+# Capture's own "is there still a window that Window > Close All would close?" -
+# EnableAllWindowCloseMenu(), PDF p.136, the same test the shipped
+# capCloseAllChildWindows.tcl wires to OnUpdateCloseChildWindows.
+#
+# 1 = something left, 0 = nothing left, -1 = the command would not answer, which
+# is not the same as "nothing left" and must not be treated as it.
+proc ::mUtilMenu::AnythingLeftToClose { } {
+    if { [info commands EnableAllWindowCloseMenu] eq "" } {
+        return -1
+    }
+    set lR ""
+    if { [catch { set lR [EnableAllWindowCloseMenu] }] } {
+        return -1
+    }
+    if { $lR eq "" } {
+        return -1
+    }
+    if { [catch { set lR [expr { $lR ? 1 : 0 }] }] } {
+        return -1
+    }
+    return $lR
+}
+
+# Close this project's pages: keep calling, and when a route stops achieving
+# anything, move to the next route rather than repeating it.
+#
+# Two things had to be true before this worked, and the first run only had one of
+# them:
+#
+#   repeat.  One close call does not empty the frame - the first symptom was
+#            "each project only lost a single page".
+#   NOTICE WHEN NOTHING IS HAPPENING.  Repeating alone turned that into 200
+#            rounds of a no-op, because the route being repeated was the exclude
+#            one, which reports success and closes nothing.
+#
+# So every round is measured.  Progress is the active-document title moving (see
+# CloseProgressToken) or the enabler dropping to 0; mClosePageStallRounds rounds
+# with neither means this route is not working here, and the next one is tried.
+# Routes come from mClosePageRoutes.
+#
+# Ways out, all reported:
+#
+#   the enabler says nothing is left   -> done, the normal exit
+#   every route stalled                -> stop, pages may remain, and the trace
+#                                         names which routes were tried
+#   the enabler will not answer (-1)   -> one pass per route, because without it
+#                                         "done" cannot be established at all
+#   mClosePageMaxRounds reached        -> stop rather than hang Capture
+#
+# Returns {rounds route done}: done is 1 only when Capture itself said there was
+# nothing left.  A run that stalled or hit the cap is NOT done.
+proc ::mUtilMenu::ClosePagesUntilDone { } {
+    variable mClosePageMaxRounds
+    variable mClosePageStallRounds
+    variable mClosePageRoutes
+
+    set lRounds 0
+    set lRoute  ""
+    set lDone   0
+    set lTried  [list]
+
+    foreach lR $mClosePageRoutes {
+        set lStall 0
+
+        while { $lRounds < $mClosePageMaxRounds } {
+            set lLeft [::mUtilMenu::AnythingLeftToClose]
+            if { $lLeft == 0 } {
+                set lDone 1
+                break
+            }
+
+            set lBefore [::mUtilMenu::CloseProgressToken]
+
+            incr lRounds
+            if { ![::mUtilMenu::ClosePagesVia $lR] } {
+                # The command refused outright - no point repeating it.
+                break
+            }
+            set lRoute $lR
+            if { [lsearch -exact $lTried $lR] == -1 } {
+                lappend lTried $lR
+            }
+
+            set lAfter [::mUtilMenu::AnythingLeftToClose]
+            if { $lAfter == 0 } {
+                set lDone 1
+                break
+            }
+            if { $lAfter == -1 } {
+                ::mUtilMenu::Trace "  EnableAllWindowCloseMenu will not answer - one pass of '$lR' only"
+                break
+            }
+
+            # Still something open.  Did this round actually shut anything?
+            if { [::mUtilMenu::CloseProgressToken] eq $lBefore } {
+                incr lStall
+                if { $lStall >= $mClosePageStallRounds } {
+                    ::mUtilMenu::Trace "  '$lR' changed nothing in $lStall round(s) - trying the next route"
+                    break
+                }
+            } else {
+                set lStall 0
+            }
+        }
+
+        if { $lDone || $lRounds >= $mClosePageMaxRounds } {
+            break
+        }
+    }
+
+    if { !$lDone } {
+        if { $lRounds >= $mClosePageMaxRounds } {
+            ::mUtilMenu::Trace "  stopped after $mClosePageMaxRounds round(s) - something is still reported as open"
+        } else {
+            ::mUtilMenu::Trace "  no route emptied this project - tried: [join $lTried {, }]"
+        }
+    }
+    return [list $lRounds $lRoute $lDone]
+}
+
+# Kept as the name the allbutpm mode is written in terms of.
+proc ::mUtilMenu::ClosePagesKeepingPM { } {
+    return [lindex [::mUtilMenu::ClosePagesUntilDone] 2]
+}
+
+# What the window/document half of the API actually offers in THIS Capture, and
+# what the no-argument getters hand back right now.  Run it in the Command Window
+# with a project open:
+#
+#   ::mUtilMenu::DumpCloseApi
+#
+# It only reads - nothing here closes anything - and it is the quickest way to
+# settle the two questions the documentation does not answer: which getters exist,
+# and whether the document they return is the Project Manager or a page.
+proc ::mUtilMenu::DumpCloseApi { } {
+    ::mUtilMenu::Out [::mUtilMenu::Banner "--- close/window commands present ---"]
+    foreach c { capCloseChildViews capCloseChildViewsExceptCurrent \
+                capCloseAllTabs capCloseDocument capClosePM \
+                capGetActiveDocument capGetActivePMDoc capGetActiveSchematicDoc \
+                capGetPMDocList capGetActiveView capGetActiveWindow \
+                capGetActiveDocumentPathName capGetActiveDocumentTitle \
+                GetActivePM EnableAllWindowCloseMenu Open } {
+        ::mUtilMenu::Out [format "  %-32s %s" $c \
+            [expr { [info commands $c] eq "" ? "MISSING" : "ok" }]]
+    }
+
+    ::mUtilMenu::Out "--- what the no-argument getters return now ---"
+    foreach c { capGetActiveDocument capGetActivePMDoc capGetActiveSchematicDoc \
+                capGetPMDocList capGetActiveView capGetActiveWindow \
+                capGetActiveDocumentPathName capGetActiveDocumentTitle \
+                GetActivePM } {
+        if { [info commands $c] eq "" } {
+            continue
+        }
+        set lR "ERROR"
+        catch { set lR [$c] }
+        ::mUtilMenu::Out [format "  %-32s %s" $c $lR]
+    }
+    return
+}
+
+# One design at a time: bring its Project Manager to the front, then close that
+# project's pages, keeping its Project Manager.  Then put the original project
+# back in front.
+#
+# Why a loop at all, when capCloseChildViews sounds like it closes everything.
+# Because nothing says whether "child views" means the whole MDI frame or the
+# views of the ACTIVE document, and pExclude taking a single CDocument leans
+# towards the second.  The loop is correct either way: if it is frame-wide the
+# first pass does the job and the rest find nothing left to close, and if it is
+# per-document the loop is the only thing that would ever reach the second
+# project.  Doing it this way also fixes what the single-shot version could not -
+# with two projects open, GetActivePM only ever protected one of them, and the
+# other project's Project Manager was closed along with the pages.
+#
+# Open(pPath) on a design already in the session is what activates it - the same
+# call, for the same reason, as RestorePMSelection.
+proc ::mUtilMenu::ClosePagesPerDesign { } {
+    variable mClosePageReopen
+
+    set lRows [::mUtilMenu::SessionDesigns]
+    if { [llength $lRows] == 0 } {
+        ::mUtilMenu::Out "  no design in the session - closing the active project's pages only"
+        ::mUtilMenu::ClosePagesOfActiveProject
+        return 1
+    }
+
+    # Where to come back to.  Taken before anything is activated, because after
+    # the loop the active project is whichever one happened to be last.
+    set lBack [lindex [::mUtilMenu::ActivePMDesignInfo] 0]
+
+    # A modified design whose project window gets closed is a design Capture will
+    # ask about.  Said up front, because an unexpected "save changes?" in the
+    # middle of a batch is the sort of thing that gets answered wrongly.
+    set lDirty [list]
+    foreach lRow $lRows {
+        if { [lindex $lRow 2] eq "1" } {
+            lappend lDirty [file tail [lindex $lRow 0]]
+        }
+    }
+    if { [llength $lDirty] > 0 } {
+        ::mUtilMenu::Out "  unsaved: [join $lDirty {, }] - Capture may ask about these"
+    }
+
+    # The ACTIVE project goes first, and without an Open in front of it.  Two
+    # reasons, and the first is the one that matters:
+    #
+    #   Its pages are the ones on screen right now.  Whatever "current" means to
+    #   capCloseChildViewsExceptCurrent - the one route that is not guesswork -
+    #   it means them.  Closing them before anything is activated is the one pass
+    #   that cannot be got wrong.
+    #
+    #   Open on the already-active project would be a no-op with a chance of a
+    #   side effect, and no chance of a benefit.
+    #
+    # GetActiveOpjName is printed alongside, because it is the only thing that
+    # names the .OPJ rather than the .DSN, and seeing it move down the list is
+    # how the loop is checked from outside.
+    set lOrder [list]
+    foreach lRow $lRows {
+        if { $lBack ne "" && [file normalize [lindex $lRow 0]] eq [file normalize $lBack] } {
+            set lOrder [linsert $lOrder 0 $lRow]
+        } else {
+            lappend lOrder $lRow
+        }
+    }
+
+    ::mUtilMenu::Out "  [llength $lOrder] design(s) open:"
+    set lN     0
+    set lOK    0
+    foreach lRow $lOrder {
+        incr lN
+        set lPath [lindex $lRow 0]
+
+        # Everything after the first has to be brought to the front before its
+        # pages are its pages.
+        if { $lN > 1 } {
+            if { [catch { Open [file normalize $lPath] } lErr] } {
+                ::mUtilMenu::Out [format "    %d/%d  %s - could not activate (%s), skipped" \
+                    $lN [llength $lOrder] [file tail $lPath] $lErr]
+                continue
+            }
+        }
+
+        set lOpj ""
+        catch { set lOpj [GetActiveOpjName] }
+
+        set lRes    [::mUtilMenu::ClosePagesUntilDone]
+        set lRounds [lindex $lRes 0]
+        set lRoute  [lindex $lRes 1]
+        set lDone   [lindex $lRes 2]
+
+        set lNote ""
+        if { $lOpj ne "" } {
+            set lNote "   opj: [file tail $lOpj]"
+        }
+
+        if { $lDone && $lRounds == 0 } {
+            incr lOK
+            ::mUtilMenu::Out [format "    %d/%d  %s - nothing was open%s" \
+                $lN [llength $lOrder] [file tail $lPath] $lNote]
+        } elseif { $lDone } {
+            incr lOK
+            ::mUtilMenu::Out [format "    %d/%d  %s - closed in %d round(s) (%s)%s" \
+                $lN [llength $lOrder] [file tail $lPath] $lRounds $lRoute $lNote]
+        } else {
+            ::mUtilMenu::Out [format "    %d/%d  %s - %d round(s), pages MAY REMAIN (%s)%s" \
+                $lN [llength $lOrder] [file tail $lPath] $lRounds \
+                [::mUtilMenu::OrDash $lRoute] $lNote]
+        }
+    }
+
+    # Put every project back.  This is what makes the no-argument close safe to
+    # use: whether or not it took the project tree down with the pages, opening
+    # the design again restores it, and on a project that never closed Open just
+    # activates it.  The one that was active before goes LAST so it ends up in
+    # front, which is also why it is not skipped here.
+    if { $mClosePageReopen } {
+        foreach lRow $lRows {
+            if { [catch { Open [file normalize [lindex $lRow 0]] } lErr] } {
+                ::mUtilMenu::Trace "  could not reopen [file tail [lindex $lRow 0]] -> $lErr"
+            }
+        }
+    }
+    if { $lBack ne "" } {
+        if { [catch { Open [file normalize $lBack] } lErr] } {
+            ::mUtilMenu::Trace "  could not reactivate [file tail $lBack] -> $lErr"
+        }
+    }
+
+    # The last word, from Capture rather than from this loop's own bookkeeping:
+    # after everything, is anything still reported as open?  If the reopen pass
+    # just put the project windows back this will say 1, which is correct and
+    # expected - those are the Project Managers, not pages.
+    set lLeft [::mUtilMenu::AnythingLeftToClose]
+    ::mUtilMenu::Out [format "  (%d of %d design(s) closed cleanly; EnableAllWindowCloseMenu now %s)" \
+        $lOK $lN [expr { $lLeft < 0 ? "unknown" : $lLeft }]]
+    return 1
+}
+
+proc ::mUtilMenu::DoClosePage { pVia } {
+    variable mClosePageMode
+
+    ::mUtilMenu::Trace "Close Page callback reached via $pVia - mode '$mClosePageMode'"
+
+    set lAny "?"
+    catch { set lAny [EnableAllWindowCloseMenu] }
+    ::mUtilMenu::Trace "  EnableAllWindowCloseMenu -> $lAny"
+
+    switch -- $mClosePageMode {
+        exceptcurrent {
+            if { [catch { capCloseChildViewsExceptCurrent } lErr] } {
+                ::mUtilMenu::Trace "Close Page failed -> $lErr"
+            }
+            return true
+        }
+        all {
+            if { [catch { capCloseChildViews } lErr] } {
+                ::mUtilMenu::Trace "Close Page failed -> $lErr"
+            }
+            return true
+        }
+        allbutpm {
+            ::mUtilMenu::ClosePagesKeepingPM
+            return true
+        }
+    }
+
+    # perdesign, and anything unrecognised - the one that covers every open
+    # project is the right default for a typo as well.
+    ::mUtilMenu::ClosePagesPerDesign
     return true
 }
 
 #=============================================================================
 # Schematic Check
 #
-# One question: is what the Project Manager has selected right now a Design
-# (.DSN) or the Project (.OPJ)?  If it is, the message box names the file.
+# What the Project Manager has selected decides the SCOPE, and the check itself is
+# the same whatever the scope is:
+#
+#   a page              that page
+#   a schematic         every page in it
+#   the Design (.DSN)   every page of every schematic in it
+#   the Project (.OPJ)  the design the PM has open, then as above
+#
+# Per page: the grid block, the full page dump, then
+# Search_Missing_connection_onGrid over what the dump collected.  Anything it
+# finds is drawn on the page (MarkGridFindings) and the page name gets a '*' in
+# front of it (StarPageObj), so the PM tree shows which pages need opening.
+#
+# The narrowest selected kind wins, so clicking a page inside a selected design
+# means that page.  The message box is one table, one line per page - the grid
+# blocks and the dumps stay in the Command Window where there is room for them.
 #
 # The commands are Appendix A p.129-132:
 #
@@ -5083,6 +6955,210 @@ proc ::mUtilMenu::DoClosePage { pVia } {
 # name matching - see ClassifyPMItem, which is the only proc that would change.
 #=============================================================================
 
+# The Dbo class a Project Manager item is, when the item came back as a SWIG
+# pointer rather than as a label - "DboPage", "DboDesign", "DboSchematic" - or ""
+# when it is a plain label like "Design Resources".
+#
+# GetSelectedPMItems mixes the two: a folder node has nothing behind it but its
+# name, while a node that IS a database object comes back as that object's SWIG
+# handle, which looks like
+#
+#     _30f4a1b200000000_p_DboPage
+#
+# The trailing class name is the whole point - it says what was selected without
+# any guessing at labels.  Both the _p_ form and a bare _<Class> tail are matched,
+# since only the first is guaranteed by SWIG's own naming.
+proc ::mUtilMenu::PMItemDboClass { pLabel } {
+    if { [regexp {_p_(Dbo[A-Za-z0-9]+)$} $pLabel -> lClass] } {
+        return $lClass
+    }
+    if { [regexp {_(Dbo[A-Za-z0-9]+)$} $pLabel -> lClass] } {
+        return $lClass
+    }
+    return ""
+}
+
+# Make a SWIG handle callable as a Tcl command.  "<Class> -this <ptr>" is the
+# same two-line idiom GetDesignPages uses on $::DboSession_s_pDboSession - it
+# registers the pointer string as a command, it does not construct anything.
+# Returns 1 when $pHandle can be sent methods afterwards.
+proc ::mUtilMenu::BindDboHandle { pHandle pClass } {
+    if { [llength [info commands $pHandle]] } {
+        return 1
+    }
+    if { [catch { $pClass -this $pHandle } lErr] } {
+        ::mUtilMenu::Trace "$pClass -this $pHandle failed -> $lErr"
+        return 0
+    }
+    return 1
+}
+
+# One int-returning DboPage getter that takes a DboState, as "" when it will not
+# answer.  Every property in the grid block is optional as far as this report is
+# concerned - a page that cannot say whether its border is printed is still worth
+# reporting the rest of.
+proc ::mUtilMenu::PageIntProp { pPage pGetter pStatus } {
+    set lVal ""
+    if { [catch { set lVal [$pPage $pGetter $pStatus] }] } {
+        return ""
+    }
+    return $lVal
+}
+
+proc ::mUtilMenu::YesNo { pVal } {
+    if { $pVal eq "" }  { return "-"   }
+    if { $pVal }        { return "Yes" }
+    return "No"
+}
+
+# What Capture's Schematic Page Properties > Grid Reference tab holds for one
+# page, as a dict.  Every one of these is a documented DboPage getter taking a
+# DboState (Appendix A, the DboPage class):
+#
+#   GetHorizontalLabelCount / Width / IsChar / IsVisible / IsAscending
+#   GetVerticalLabelCount   / Width / IsChar / IsVisible / IsAscending
+#   GetGridRefDisplayed / GetGridRefPrinted / GetANSIGridRefs
+#   GetBorderDisplayed  / GetBorderPrinted
+#   GetTitleBlockDisplayed / GetTitleBlockPrinted
+#
+# IsChar 1 = the labels are letters (A, B, C), 0 = numbers.  Width is the label
+# band, in doc units.
+#
+# The page's size and granularity are collected with it.  They are not on the
+# Grid Reference tab, but "what is this page's grid" has a second reading - the
+# coordinate grid the dump prints in - and GetPhysicalGranularity is the answer
+# to that one.  Both are cheap, so both are reported rather than picking a
+# reading of the question.
+#
+# GetIsMetric and GetDocUnitsPerInch come along for the same reason: granularity
+# alone does not say what it is granularity OF.  Both are DboPage's own and both
+# take no arguments (GetIsMetric is used exactly this way in the shipped
+# capCustomSamples/capCustomizePage.tcl:61).
+proc ::mUtilMenu::CollectPageGrid { pPage } {
+    set lStatus [DboState]
+    set lOut    [dict create]
+
+    foreach lAxis { Horizontal Vertical } {
+        foreach lProp { Count Width IsChar IsVisible IsAscending } {
+            dict set lOut "$lAxis$lProp" \
+                [::mUtilMenu::PageIntProp $pPage "Get${lAxis}Label${lProp}" $lStatus]
+        }
+    }
+    foreach lProp { GridRefDisplayed GridRefPrinted ANSIGridRefs \
+                    BorderDisplayed BorderPrinted \
+                    TitleBlockDisplayed TitleBlockPrinted } {
+        dict set lOut $lProp [::mUtilMenu::PageIntProp $pPage "Get$lProp" $lStatus]
+    }
+
+    # Page size: a name ("A", "B", "C") plus the drawable extent as a CSize.
+    dict set lOut SizeName [::mUtilMenu::CStr $pPage GetSizeName]
+    dict set lOut SizeX ""
+    dict set lOut SizeY ""
+    catch {
+        set lSize [$pPage GetSize $lStatus]
+        dict set lOut SizeX [DboTclHelper_sGetCSizeX $lSize]
+        dict set lOut SizeY [DboTclHelper_sGetCSizeY $lSize]
+    }
+
+    dict set lOut Granularity ""
+    catch { dict set lOut Granularity [$pPage GetPhysicalGranularity] }
+
+    # Which unit the granularity above is PER.  GetPhysicalGranularity is doc
+    # units per user unit and the user unit is the millimetre on a metric page, so
+    # without these two the same "100" means two different physical sizes and
+    # every coordinate below it reads wrong by a factor of 25.4.
+    dict set lOut IsMetric ""
+    catch { dict set lOut IsMetric [$pPage GetIsMetric] }
+    dict set lOut DocPerInch ""
+    catch { dict set lOut DocPerInch [$pPage GetDocUnitsPerInch] }
+
+    catch { $lStatus -delete }
+    return $lOut
+}
+
+# "5  (alphabetic, ascending, shown, width 100)" for one axis of the grid.
+proc ::mUtilMenu::GridAxisStr { pGrid pAxis } {
+    set lCount [dict get $pGrid "${pAxis}Count"]
+    set lBits  [list]
+    lappend lBits [expr { [dict get $pGrid "${pAxis}IsChar"] eq ""   ? "-" :
+                          [dict get $pGrid "${pAxis}IsChar"]         ? "alphabetic" : "numeric" }]
+    lappend lBits [expr { [dict get $pGrid "${pAxis}IsAscending"] eq "" ? "-" :
+                          [dict get $pGrid "${pAxis}IsAscending"]       ? "ascending" : "descending" }]
+    lappend lBits [expr { [dict get $pGrid "${pAxis}IsVisible"] eq ""   ? "-" :
+                          [dict get $pGrid "${pAxis}IsVisible"]         ? "shown" : "hidden" }]
+    lappend lBits "width [::mUtilMenu::OrDash [dict get $pGrid "${pAxis}Width"]]"
+    return "[::mUtilMenu::OrDash $lCount]  ([join $lBits {, }])"
+}
+
+# The grid block, printed to the Command Window and returned as the same text so
+# the message box can show it too - one source, so the two can never disagree.
+proc ::mUtilMenu::FormatPageGrid { pGrid } {
+    variable mCoordMode
+    variable mCoordDecimals
+
+    set lTxt ""
+    append lTxt "Grid Reference:\n"
+    append lTxt "  Horizontal:  [::mUtilMenu::GridAxisStr $pGrid Horizontal]\n"
+    append lTxt "  Vertical:    [::mUtilMenu::GridAxisStr $pGrid Vertical]\n"
+    append lTxt "  Displayed:   [::mUtilMenu::YesNo [dict get $pGrid GridRefDisplayed]]"
+    append lTxt "      Printed:  [::mUtilMenu::YesNo [dict get $pGrid GridRefPrinted]]\n"
+    append lTxt "  ANSI refs:   [::mUtilMenu::YesNo [dict get $pGrid ANSIGridRefs]]\n"
+    append lTxt "\n"
+    append lTxt "Border:        [::mUtilMenu::YesNo [dict get $pGrid BorderDisplayed]]"
+    append lTxt "      Printed:  [::mUtilMenu::YesNo [dict get $pGrid BorderPrinted]]\n"
+    append lTxt "Title block:   [::mUtilMenu::YesNo [dict get $pGrid TitleBlockDisplayed]]"
+    append lTxt "      Printed:  [::mUtilMenu::YesNo [dict get $pGrid TitleBlockPrinted]]\n"
+    append lTxt "\n"
+
+    set lSize [::mUtilMenu::OrDash [dict get $pGrid SizeName]]
+    if { [dict get $pGrid SizeX] ne "" } {
+        append lSize "  ([dict get $pGrid SizeX] x [dict get $pGrid SizeY] doc units)"
+    }
+    append lTxt "Page size:     $lSize\n"
+
+    # Which unit system the page is in, before the granularity that is measured in
+    # it: a bare "Granularity: 100" is ambiguous, and the ambiguity is a factor of
+    # 25.4 wide.
+    set lMetric [dict get $pGrid IsMetric]
+    set lUnit   "in"
+    if { $lMetric eq "" } {
+        append lTxt "Page units:    inches (GetIsMetric would not answer - Capture's default)\n"
+    } elseif { $lMetric } {
+        set lUnit "mm"
+        append lTxt "Page units:    mm (metric page)\n"
+    } else {
+        append lTxt "Page units:    inches\n"
+    }
+
+    append lTxt "Granularity:   [::mUtilMenu::OrDash [dict get $pGrid Granularity]] doc units per $lUnit"
+    if { [dict get $pGrid DocPerInch] ne "" } {
+        append lTxt "   ([dict get $pGrid DocPerInch] per inch)"
+    }
+    append lTxt "\n"
+
+    # The one line that says how to read every coordinate below it.  The database
+    # holds doc integers; the dump divides them by the granularity above unless
+    # mCoordMode says "doc", and saying so here means nobody has to work out from
+    # the numbers whether a 15240 is 15240 or 152.40.  The worked example is built
+    # with the same Coord the columns use, so it shows the real precision rather
+    # than a second opinion about it.
+    set lGran [dict get $pGrid Granularity]
+    if { $mCoordMode ne "doc" && $lGran ne "" && $lGran > 0 } {
+        # The example is 6 inches in whatever the page's unit is, so it lands on a
+        # round 6.00 on an inch page and on 152.40 on a metric one.
+        set lPerUnit 1
+        if { $lUnit eq "mm" } {
+            set lPerUnit 25.4
+        }
+        set lEg [expr { round(6.0 * $lPerUnit * $lGran) }]
+        append lTxt "Dump units:    $lUnit - doc units / $lGran"
+        append lTxt "  (e.g. $lEg doc = [format "%.${mCoordDecimals}f" [expr { double($lEg) / $lGran }]] $lUnit)\n"
+    } else {
+        append lTxt "Dump units:    raw doc units\n"
+    }
+    return [string trimright $lTxt "\n"]
+}
+
 # The design the active Project Manager is showing, as {filePath rootName}, or
 # {"" ""} when there is no active PM - which is what GetActivePMDesign returning
 # NULL means, and the same NULL test the shipped scripts make on it
@@ -5103,7 +7179,12 @@ proc ::mUtilMenu::ActivePMDesignInfo { } {
 }
 
 # Which of the two things one PM tree label is, if either.  Returns
-# {design|project|other <fullPath>}; the path is "" for "other".
+# {design|project|page|schematic|other <value>}.
+#
+# The second element is a full PATH for the label-matched kinds, and the SWIG
+# HANDLE for the ones recognised by class - the caller tells them apart by the
+# kind, and PagesForPMItem / DesignPathOf are what turn a handle back into
+# something to print.
 #
 # Everything is compared lowercased: Windows paths are case-insensitive and the
 # PM does not necessarily show a file in the case it is stored in.
@@ -5112,6 +7193,20 @@ proc ::mUtilMenu::ClassifyPMItem { pLabel pDsn pDsnRoot pOpj } {
     if { $lLabel eq "" } {
         return [list other ""]
     }
+
+    # A SWIG handle says what it is outright - no label guessing needed.  The
+    # second element is the handle itself rather than a path: the object is what
+    # the caller wants for these, and a page has no path of its own anyway.
+    set lClass [::mUtilMenu::PMItemDboClass $lLabel]
+    if { $lClass ne "" } {
+        switch -- $lClass {
+            DboPage      { return [list page      $lLabel] }
+            DboSchematic { return [list schematic $lLabel] }
+            DboDesign    { return [list design    $lLabel] }
+        }
+        return [list other ""]
+    }
+
     set lLow  [string tolower $lLabel]
     set lRoot [string tolower [file rootname [file tail $lLabel]]]
 
@@ -5133,8 +7228,1630 @@ proc ::mUtilMenu::ClassifyPMItem { pLabel pDsn pDsnRoot pOpj } {
     return [list other ""]
 }
 
+# The .DSN path behind a DboDesign / DboLib handle, or "" - DboLib::GetName is
+# the design's file name, the same string GetDesignAndSchematics is keyed on.
+proc ::mUtilMenu::DesignPathOf { pHandle } {
+    if { ![::mUtilMenu::BindDboHandle $pHandle DboDesign] } {
+        return ""
+    }
+    return [::mUtilMenu::CStr $pHandle GetName]
+}
+
+#-----------------------------------------------------------------------------
+# Search_Missing_connection_onGrid - the wires that nearly touch
+#
+# The question: a net ends half a grid step away from a pin.  On screen at 50%
+# zoom the two look joined, the schematic reads as connected, and it is not - the
+# wire was drawn with the snap grid off, so it stopped just short.  Capture
+# reports nothing, because as far as the database is concerned nothing is wrong:
+# the pin is simply on no net.
+#
+# So the geometry has to be measured, and this is what measures it.  Every net
+# endpoint is checked against every OTHER endpoint on the page - part pins,
+# off-page / power / port symbols, bus wire ends, and other nets' wire ends - and
+# a pair is reported when it is not already on the same net and the gap between
+# the two is smaller than min_dis.  A gap of exactly nothing is a finding against
+# another net and not against anything else; see DISTANCE below.
+#
+# WHAT COUNTS AS A PAIR
+#
+#   driver      one endpoint of one net wire.  Nets drive the search because a
+#               missing connection is always a net that failed to reach something
+#               - two pins half a step apart are just two pins.
+#   candidate   any endpoint on the page, the driver's own net excluded.
+#
+#   The exclusion is by NET, not by object: a pin sitting on net A and a wire end
+#   of net A are the same electrical point, and reporting the pair would report
+#   every correctly wired pin on the page.  A pin on no net gets a group of its
+#   own, so an unwired pin near a net is always a candidate - that is the case
+#   this whole proc exists for.
+#
+# DISTANCE
+#
+#   Manhattan, |dx| + |dy|, in doc units, no square root and no floating point in
+#   the inner loop.  It is never smaller than the true distance, so nothing real
+#   is missed; it is up to twice as large on a diagonal, which at these
+#   tolerances means a diagonal near-miss is reported slightly less eagerly than
+#   an orthogonal one.  Schematic wires are orthogonal.
+#
+#   Whether a zero gap counts depends on what the net endpoint is near, because
+#   "two things in the same place" means two different things:
+#
+#     vs a pin, a symbol or a bus end   0 < distance < min_dis.  A zero gap here
+#         is the endpoint TOUCHING the pin or the bus, which is exactly what a
+#         made connection looks like - so it is tallied and passed over, not
+#         reported.
+#     vs another net's endpoint         0 <= distance < min_dis.  A zero gap here
+#         is two SEPARATE net objects at one point.  Capture merges wires that
+#         meet into a single net, so two nets that did not merge while sharing a
+#         point is an anomaly worth seeing - reported, and flagged in the listing.
+#
+# SPEED
+#
+#   A page with 3000 pins and 1000 net endpoints is 3 million pair tests done the
+#   obvious way, which in Tcl is minutes.  So the endpoints go into a hash of
+#   min_dis-sized square buckets first, and each driver only looks in its own
+#   bucket and the eight around it: with a bucket exactly min_dis across, any
+#   point within |dx|+|dy| < min_dis is also within min_dis on each axis on its
+#   own, so it cannot be further away than one bucket.  Nothing is missed and the
+#   work goes from N x M to roughly N.
+#
+#-----------------------------------------------------------------------------
+
+# min_dis -> the doc-unit integer the search compares against.  Three modes, see
+# mGridMinDisUnits:
+#
+#   grid  min_dis x mGridStepInch x GetDocUnitsPerInch.  Grid steps are the only
+#         unit that means the same thing on an inch page and a metric one, which
+#         is the whole reason this mode is the default: 0.5 is half a step at
+#         0.05 in on one page and 1.27 mm on the other, and both of those are
+#         "half a step".  GetDocUnitsPerInch is DboPage's per-INCH scale, not
+#         GetPhysicalGranularity, which is per USER unit and would hand back
+#         millimetres on a metric page.
+#   user  min_dis x GetPhysicalGranularity, the same conversion and the same
+#         fallback as MarkOffsetDoc.  The units are the page's own.
+#   doc   min_dis as it stands.
+#
+# A getter that will not answer degrades one mode at a time - grid falls back to
+# user, user falls back to doc - and says so in the Command Window rather than
+# silently searching at the wrong scale.
+proc ::mUtilMenu::GridTolDoc { pPage pMinDis } {
+    variable mGridMinDisUnits
+    variable mGridStepInch
+
+    if { $mGridMinDisUnits eq "doc" || $pPage eq "" } {
+        return [expr { round($pMinDis) }]
+    }
+
+    if { $mGridMinDisUnits eq "grid" } {
+        set lDpi 0
+        catch { set lDpi [$pPage GetDocUnitsPerInch] }
+        if { $lDpi > 0 } {
+            return [expr { round(double($pMinDis) * $mGridStepInch * $lDpi) }]
+        }
+        ::mUtilMenu::Trace "GetDocUnitsPerInch gave nothing on this page - taking min_dis as user units"
+    }
+
+    set lGran 0
+    catch { set lGran [$pPage GetPhysicalGranularity] }
+    if { $lGran <= 0 } {
+        ::mUtilMenu::Trace "no physical granularity on this page - taking min_dis as doc units"
+        return [expr { round($pMinDis) }]
+    }
+    return [expr { round(double($pMinDis) * $lGran) }]
+}
+
+# Every endpoint on the page that a net could have been meant to reach, out of
+# the dict DumpPageInfoOn returned - no second walk of the database, the dump
+# already read all of it.  One record per endpoint:
+#
+#   0 kind    NET / PIN / OFFPAGE / GLOBAL / PORT / BUS / BUNDLE
+#   1 label   what to call it in the report - net name, "U12.A10", "GND"
+#   2 group   the electrical identity two endpoints have to DIFFER in to be worth
+#             reporting: "net:<name>" for anything sitting on a net, and a key of
+#             its own ("pin:U12.A10", "sym#7", "net#3") for anything that is not.
+#             Unnamed nets get an index rather than a shared "net:", so two of
+#             them are not silently treated as the same net.
+#   3 x
+#   4 y       doc units, straight off the object - the printed columns are rounded
+#             for printing and cannot be measured with.
+#   5 note    the connection phrase the dump prints for it, "" for a wire end
+#   6 box     the bounding box, in doc units, of the OBJECT this endpoint belongs
+#             to - the pin's whole part, the symbol, or {} for a wire end (a wire
+#             has no area, so MarkGridFindings pads a square round the point
+#             instead).  Only the marker drawing reads it.
+#
+# Everything here is an ENDPOINT, never a mid-wire point: Capture joins a wire to
+# a pin at the pin's hot spot and to another wire at a wire end, so those are the
+# only places a connection was supposed to happen.
+proc ::mUtilMenu::GridEndpoints { pDict } {
+    set lOut [list]
+
+    set lIdx 0
+    foreach lRow [dict get $pDict nets] {
+        incr lIdx
+        set lGrp [::mUtilMenu::GridNetGroup $lIdx [lindex $lRow 0]]
+        set lLbl [::mUtilMenu::OrDash [lindex $lRow 0]]
+        # Element 2 is the wires as {x1 y1 x2 y2} doc quads - see CollectPageNets.
+        foreach lSeg [lindex $lRow 2] {
+            if { [llength $lSeg] != 4 } {
+                continue
+            }
+            lappend lOut [list NET $lLbl $lGrp [lindex $lSeg 0] [lindex $lSeg 1] "" ""]
+            lappend lOut [list NET $lLbl $lGrp [lindex $lSeg 2] [lindex $lSeg 3] "" ""]
+        }
+    }
+
+    # Part pins.  Element 4 of a pin record is the hot spot, which is only filled
+    # in when the position was asked for - Schematic Check raises mPinPosAll so
+    # that every pin has one, wired or not.  See CheckOnePage.
+    foreach lRow [dict get $pDict parts] {
+        set lRef [::mUtilMenu::OrDash [lindex $lRow 0]]
+        foreach lPin [lindex $lRow 10] {
+            set lPos [lindex $lPin 4]
+            if { [llength $lPos] != 2 } {
+                continue
+            }
+            set lNum [lindex $lPin 1]
+            if { $lNum eq "" } {
+                set lNum [::mUtilMenu::OrDash [lindex $lPin 0]]
+            }
+            set lNet [lindex $lPin 3]
+            set lGrp "pin:$lRef.$lNum"
+            if { $lNet ne "" } {
+                set lGrp "net:$lNet"
+            }
+            # Element 9 of the part row is the PART's bounding box, which is what
+            # gets boxed on the page: a box round one pin would be a few doc units
+            # across and invisible at any zoom that shows a whole page.
+            lappend lOut [list PIN "$lRef.$lNum" $lGrp \
+                               [lindex $lPos 0] [lindex $lPos 1] \
+                               [::mUtilMenu::PinConnStr $lPin] \
+                               [lindex $lRow 9]]
+        }
+    }
+
+    # Off-page connectors, power symbols and ports.
+    #
+    # Element 6 is the CONNECTION POINT - SymHotSpotDoc, {x y route} - and it is
+    # what a distance to a net endpoint has to be measured from.  Element 4 is
+    # GetLocation, the placement origin, which for a left-pointing off-page
+    # connector is the top-left corner of its bounding box: measuring from there
+    # was out by half a symbol, and at min_dis = half a grid step that is enough
+    # to lose a real near miss.  Element 4 stays as the fallback for a symbol
+    # SymHotSpotDoc could not answer for, and for a dict collected before element
+    # 6 existed.
+    set lIdx 0
+    foreach lRow [dict get $pDict symbols] {
+        incr lIdx
+        set lPos [lindex $lRow 6]
+        if { [llength $lPos] < 2 } {
+            set lPos [lindex $lRow 4]
+        }
+        if { [llength $lPos] < 2 } {
+            continue
+        }
+        set lNet [lindex $lRow 3]
+        set lGrp "sym#$lIdx"
+        if { $lNet ne "" } {
+            set lGrp "net:$lNet"
+        }
+        lappend lOut [list [lindex $lRow 0] [::mUtilMenu::OrDash [lindex $lRow 1]] $lGrp \
+                           [lindex $lPos 0] [lindex $lPos 1] \
+                           [::mUtilMenu::ConnStr 0 $lNet] \
+                           [lindex $lRow 5]]
+    }
+
+    # Bus and bundle wires.  A bus is not a net, so both its ends share a group of
+    # their own and a net wire that stops short of the bus is a reportable pair.
+    foreach lRow [dict get $pDict buses] {
+        set lSeg [lindex $lRow 3]
+        if { [llength $lSeg] != 4 } {
+            continue
+        }
+        set lKind [lindex $lRow 1]
+        set lLbl  [lindex $lRow 0]
+        set lGrp  "bus:$lKind $lLbl"
+        lappend lOut [list $lKind $lLbl $lGrp [lindex $lSeg 0] [lindex $lSeg 1] "" ""]
+        lappend lOut [list $lKind $lLbl $lGrp [lindex $lSeg 2] [lindex $lSeg 3] "" ""]
+    }
+
+    return $lOut
+}
+
+# One net's group key.  Two callers derive it - GridEndpoints for the search and
+# GridNetSegIndex for the drawing - and they have to agree exactly or the drawing
+# would look up a net the search never named, so the rule lives here rather than
+# twice.
+#
+# An unnamed net is keyed by its position in the rows instead of by a shared
+# "net:", so two nameless nets are not taken for one net.  Both callers walk the
+# same list in the same order, so the same net gets the same index in both.
+proc ::mUtilMenu::GridNetGroup { pIdx pName } {
+    if { $pName ne "" } {
+        return "net:$pName"
+    }
+    return "net#$pIdx"
+}
+
+# group key -> that net's wires, as {x1 y1 x2 y2} doc quads.  This is what turns
+# "net VCCM_EN_A1 is 0.25 mm from N44011769" into a set of lines to draw: a
+# finding names the two nets, and every wire of each has to be marked, not just
+# the one wire whose end was measured.
+proc ::mUtilMenu::GridNetSegIndex { pDict pArrName } {
+    upvar 1 $pArrName lArr
+
+    set lIdx 0
+    foreach lRow [dict get $pDict nets] {
+        incr lIdx
+        set lArr([::mUtilMenu::GridNetGroup $lIdx [lindex $lRow 0]]) [lindex $lRow 2]
+    }
+}
+
+# "若端點重覆記得排除" - the same endpoint really is read many times over: every
+# wire of a net ends where the next one starts, so a net with 12 wires hands in
+# the same junction up to a dozen times, and each copy would be a pair test and a
+# duplicate line in the report.
+#
+# Identity is kind + label + group + position, NOT position alone: two pins of the
+# same net can legitimately sit on one point (a pin landing exactly on another
+# part's pin), and those are two different objects worth naming separately.
+proc ::mUtilMenu::GridDedupPoints { pPts } {
+    set lOut [list]
+    array set lSeen {}
+    foreach lP $pPts {
+        set lKey [join [lrange $lP 0 4] "|"]
+        if { [info exists lSeen($lKey)] } {
+            continue
+        }
+        set lSeen($lKey) 1
+        lappend lOut $lP
+    }
+    return $lOut
+}
+
+# One endpoint, as the string that identifies it in a pair key: what it is, what
+# it is called and where it is.  The GROUP is deliberately left out - a pair is
+# the same pair however the two sides were grouped.
+proc ::mUtilMenu::GridPtKey { pPt } {
+    return "[lindex $pPt 0]|[lindex $pPt 1]|[lindex $pPt 3],[lindex $pPt 4]"
+}
+
+# One endpoint's position in the units the rest of the dump prints - the doc
+# integers are what the search measures with, the report is what a human reads.
+proc ::mUtilMenu::GridPtStr { pPage pPt } {
+    return "([::mUtilMenu::Coord $pPage [lindex $pPt 3]],[::mUtilMenu::Coord $pPage [lindex $pPt 4]])"
+}
+
+# The search itself.  Prints its findings and returns them as a list of
+# {distDoc driverPoint otherPoint}, nearest pair first.
+#
+# pPage is only used to convert units - min_dis into doc units on the way in, doc
+# distances back into inches on the way out.  pDict is what DumpPageInfoOn
+# returned for that same page.
+#
+# min_dis is in the units mGridMinDisUnits names, "user" (inches) by default, so
+# 0.05 means half of Capture's 0.1 in snap grid, and on a granularity-100 page
+# that is 5 doc units.  The default is mGridMinDis's value - see the variable for
+# why half a grid step is the tolerance worth checking at.
+proc ::mUtilMenu::Search_Missing_connection_onGrid { pPage pDict {min_dis 0.05} } {
+    variable mGridMinDisUnits
+    variable mGridListMax
+
+    # Two clocks: lT0 always runs, so the section can print its own cost even
+    # with mTimeCompare off, and TimeNow/TimeMark feed the phase breakdown
+    # CheckOnePage prints under "timing - Schematic Check".
+    set lT0   [clock milliseconds]
+    set lTAll [::mUtilMenu::TimeNow]
+
+    set lThr [::mUtilMenu::GridTolDoc $pPage $min_dis]
+
+    ::mUtilMenu::Out "  Missing connections - net endpoints nearly touching something they are not on"
+    ::mUtilMenu::Out "    vs pin / symbol / bus end:  0 <  gap < min_dis   (gap 0 = touching = connected)"
+    ::mUtilMenu::Out "    vs another net's endpoint:  0 <= gap < min_dis   (gap 0 = two nets that did not merge)"
+    if { $lThr <= 0 } {
+        ::mUtilMenu::Out "    min_dis $min_dis $mGridMinDisUnits came to $lThr doc units - nothing can be closer than that, skipped"
+        return [list]
+    }
+
+    set lT   [::mUtilMenu::TimeNow]
+    set lPts [::mUtilMenu::GridDedupPoints [::mUtilMenu::GridEndpoints $pDict]]
+    ::mUtilMenu::TimeMark "gridcheck endpoints" $lT
+
+    # Bucket index, one bucket per min_dis square.  Tcl's integer / floors toward
+    # negative infinity, so a negative coordinate buckets the same way a positive
+    # one does and the 3x3 neighbourhood below stays correct either side of zero.
+    set lT [::mUtilMenu::TimeNow]
+    array set lBkt {}
+    foreach lP $lPts {
+        set lKey "[expr { [lindex $lP 3] / $lThr }],[expr { [lindex $lP 4] / $lThr }]"
+        lappend lBkt($lKey) $lP
+    }
+    ::mUtilMenu::TimeMark "gridcheck index" $lT
+
+    set lT        [::mUtilMenu::TimeNow]
+    set lFinds    [list]
+    set lDrivers  0
+    set lTests    0
+    set lTouching 0
+    array set lPairSeen {}
+    array set lDrvSeen  {}
+
+    foreach lP $lPts {
+        if { [lindex $lP 0] ne "NET" } {
+            continue
+        }
+        # One net's endpoint, once - a junction shared by three wires of the same
+        # net is one place on the page, not three.
+        set lDKey "[lindex $lP 2]|[lindex $lP 3]|[lindex $lP 4]"
+        if { [info exists lDrvSeen($lDKey)] } {
+            continue
+        }
+        set lDrvSeen($lDKey) 1
+        incr lDrivers
+
+        set lBx [expr { [lindex $lP 3] / $lThr }]
+        set lBy [expr { [lindex $lP 4] / $lThr }]
+
+        for { set lDx -1 } { $lDx <= 1 } { incr lDx } {
+            for { set lDy -1 } { $lDy <= 1 } { incr lDy } {
+                set lKey "[expr { $lBx + $lDx }],[expr { $lBy + $lDy }]"
+                if { ![info exists lBkt($lKey)] } {
+                    continue
+                }
+                foreach lQ $lBkt($lKey) {
+                    # Same net - the two are the same electrical point and being
+                    # in the same place is what they are supposed to be.
+                    if { [lindex $lQ 2] eq [lindex $lP 2] } {
+                        continue
+                    }
+                    incr lTests
+                    set lD [expr { abs([lindex $lP 3] - [lindex $lQ 3])
+                                 + abs([lindex $lP 4] - [lindex $lQ 4]) }]
+                    if { $lD >= $lThr } {
+                        continue
+                    }
+                    # Two nets near each other are found twice, once from each
+                    # end; sorting the two sides makes the key the same both
+                    # times, so the pair is counted once.  Done before the
+                    # distance-0 test so the coincidence tally counts pairs, not
+                    # visits.
+                    set lPK [join [lsort [list [::mUtilMenu::GridPtKey $lP] \
+                                               [::mUtilMenu::GridPtKey $lQ]]] " <> "]
+                    if { [info exists lPairSeen($lPK)] } {
+                        continue
+                    }
+                    set lPairSeen($lPK) 1
+
+                    # A zero gap against a pin, a symbol or a bus end is the two
+                    # touching, which is a made connection rather than a missing
+                    # one - tallied and passed over.  Against another NET it stays
+                    # a finding: two net objects sharing a point should have been
+                    # one net.  See DISTANCE in the block comment.
+                    if { $lD == 0 && [lindex $lQ 0] ne "NET" } {
+                        incr lTouching
+                        continue
+                    }
+                    lappend lFinds [list $lD $lP $lQ]
+                }
+            }
+        }
+    }
+    ::mUtilMenu::TimeMark "gridcheck search" $lT
+
+    # Nearest first: the smaller the gap, the more certainly it was meant to be a
+    # connection.
+    set lFinds [lsort -integer -index 0 $lFinds]
+
+    # The resolved tolerance is spelled out in all three scales, because
+    # "min_dis 0.5" on its own does not say whether the search just looked half a
+    # grid step away or half a millimetre - and on a metric page those differ by
+    # a factor of fifty.
+    ::mUtilMenu::Out [format \
+        "    min_dis %s %s = %d doc units = %s %s    %d net endpoint(s) vs %d endpoint(s), %d distance test(s)" \
+        $min_dis $mGridMinDisUnits $lThr \
+        [::mUtilMenu::Coord $pPage $lThr] [::mUtilMenu::CoordUnitLabel $pPage] \
+        $lDrivers [llength $lPts] $lTests]
+
+    if { [llength $lFinds] == 0 } {
+        ::mUtilMenu::Out "    none - every net endpoint is either connected, touching what it should touch, or more than min_dis from anything else"
+    } else {
+        # Printed nearest-first and capped; the count below is of everything
+        # found, so a cut-off listing can never read as the whole answer.
+        set lShow $lFinds
+        if { $mGridListMax > 0 && [llength $lFinds] > $mGridListMax } {
+            set lShow [lrange $lFinds 0 [expr { $mGridListMax - 1 }]]
+        }
+        foreach lF $lShow {
+            set lD [lindex $lF 0]
+            set lA [lindex $lF 1]
+            set lB [lindex $lF 2]
+            ::mUtilMenu::Out [format "    %-8s %-28s %s" \
+                      [lindex $lA 0] [lindex $lA 1] [::mUtilMenu::GridPtStr $pPage $lA]]
+            # A zero gap only reaches the listing net-against-net, so it is worth
+            # saying which of the two kinds of hit this line is.
+            set lTail ""
+            if { $lD == 0 } {
+                set lTail "   (same point - two nets that did not merge)"
+            }
+            ::mUtilMenu::Out [format "      -> %-8s %-25s %-20s gap %s (%d doc)%s" \
+                      [lindex $lB 0] [lindex $lB 1] [::mUtilMenu::GridPtStr $pPage $lB] \
+                      [::mUtilMenu::Coord $pPage $lD] $lD $lTail]
+            if { [lindex $lB 5] ne "" } {
+                ::mUtilMenu::Out [format "         %-8s %s" "" [lindex $lB 5]]
+            }
+        }
+        if { [llength $lShow] < [llength $lFinds] } {
+            ::mUtilMenu::Out [format \
+                "    ... (+%d more, not listed - mGridListMax is %d; tighten min_dis instead)" \
+                [expr { [llength $lFinds] - [llength $lShow] }] $mGridListMax]
+        }
+    }
+    # The touching pairs are not findings, but they are not nothing either - they
+    # are the connections that WERE made, and a page reporting none of them at all
+    # is a page where nothing is joined to anything, which would say the endpoint
+    # data is wrong rather than the schematic.
+    ::mUtilMenu::Out [format \
+        "    (%d pair(s) found;  %d touching a pin / symbol / bus end, i.e. connected, not reported)" \
+        [llength $lFinds] $lTouching]
+    ::mUtilMenu::Out [format \
+        "    timing: Search_Missing_connection_onGrid %d ms" \
+        [expr { [clock milliseconds] - $lT0 }]]
+
+    ::mUtilMenu::TimeMark "gridcheck total" $lTAll
+    return $lFinds
+}
+
+#-----------------------------------------------------------------------------
+# MarkGridFindings - put the search's answer on the page
+#
+# The Command Window says where the near misses are in coordinates; this says it
+# in the only language a schematic review actually reads, which is the drawing.
+# Per finding:
+#
+#   the net the finding is about        every one of its wires, in PINK
+#   the far side, when it is a NET      every one of ITS wires, in DARK GREY
+#   the far side, when it is a pin,     a DEEP BLUE box round the object - the
+#     a symbol or a bus end             pin's whole part, the symbol, or a small
+#                                       square at the bus end
+#
+# So a pink net with a blue box on it reads "this net stops short of that part",
+# and pink against grey reads "these two nets nearly met".  Colours are
+# mChkNetColor / mChkOtherColor / mChkBoxColor - see those for why each palette
+# index was picked.
+#
+# Everything is collected before anything is drawn, because a net that turns up in
+# five findings is still one net and should be one set of pink lines - and because
+# a net that is the subject of one finding and the far side of another has to come
+# out pink, not grey, whichever order the findings happened to arrive in.
+#
+# The pin's PART is boxed rather than the pin: a box round one pin is a few doc
+# units across and invisible at the zoom that shows a whole page, and the part is
+# what the reviewer has to go and look at anyway.  A bus wire has no area at all,
+# so its end gets a square padded by the search tolerance.
+#
+# These are real DboGraphicLineInst / DboGraphicBoxInst objects on the page, the
+# same as the compare's markers: the page comes out modified, File > Save keeps
+# them and Undo takes them off.  mChkMark 0 turns the whole thing off.
+#
+# Returns the number of objects drawn.  Never lets a failed draw stop the rest -
+# one net whose coordinates Capture refuses should not cost the other findings
+# their markers.
+#-----------------------------------------------------------------------------
+
+# A square round one point, {left top right bottom}, for the things that have no
+# area to box.  Page y runs downward, so top is the smaller number - the order
+# CRect wants and the order DrawPageBoxOn passes straight through.
+proc ::mUtilMenu::PadBoxDoc { pX pY pPad } {
+    if { $pPad < 1 } {
+        set pPad 1
+    }
+    return [list [expr { $pX - $pPad }] [expr { $pY - $pPad }] \
+                 [expr { $pX + $pPad }] [expr { $pY + $pPad }]]
+}
+
+proc ::mUtilMenu::MarkGridFindings { pPage pDict pFinds pThr } {
+    variable mChkNetColor
+    variable mChkOtherColor
+    variable mChkBoxColor
+    variable mChkLineWidth
+    variable mChkLineStyle
+    variable mChkBoxWidth
+    variable mChkBoxStyle
+
+    if { [llength $pFinds] == 0 } {
+        return 0
+    }
+
+    array set lSegs {}
+    ::mUtilMenu::GridNetSegIndex $pDict lSegs
+
+    # Plan first, draw second - see the block comment.
+    array set lPink {}
+    array set lGrey {}
+    array set lBoxSeen {}
+    set lBoxes [list]
+
+    foreach lF $pFinds {
+        set lP [lindex $lF 1]
+        set lQ [lindex $lF 2]
+
+        set lPink([lindex $lP 2]) [lindex $lP 1]
+
+        if { [lindex $lQ 0] eq "NET" } {
+            set lGrey([lindex $lQ 2]) [lindex $lQ 1]
+            continue
+        }
+
+        set lBox [lindex $lQ 6]
+        if { [llength $lBox] != 4 } {
+            set lBox [::mUtilMenu::PadBoxDoc [lindex $lQ 3] [lindex $lQ 4] $pThr]
+        }
+
+        # Keyed on the RECTANGLE, not on the endpoint: two pins of the same part
+        # both stopping a net short are two findings but one part, and the box is
+        # the part's - keying on the pin would stack two identical rectangles on
+        # top of each other.
+        if { [info exists lBoxSeen($lBox)] } {
+            continue
+        }
+        set lBoxSeen($lBox) 1
+        lappend lBoxes [list "[lindex $lQ 0] [lindex $lQ 1]" $lBox]
+    }
+
+    # Pink wins over grey: being the subject of a finding says more about a net
+    # than being somebody else's neighbour.
+    foreach lGrp [array names lPink] {
+        catch { unset lGrey($lGrp) }
+    }
+
+    set lOffset [::mUtilMenu::MarkOffsetDoc $pPage]
+    set lDrawn  0
+    set lFailed 0
+
+    # Arrays -> {group label} lists, so the two sides can be walked by one loop
+    # without aliasing an array name at runtime.
+    set lSides [list]
+    foreach lSide [list [list lPink $mChkNetColor   "pink"] \
+                        [list lGrey $mChkOtherColor "grey"] ] {
+        set lList [list]
+        foreach lGrp [lsort [array names [lindex $lSide 0]]] {
+            if { [lindex $lSide 0] eq "lPink" } {
+                lappend lList [list $lGrp $lPink($lGrp)]
+            } else {
+                lappend lList [list $lGrp $lGrey($lGrp)]
+            }
+        }
+        lappend lSides [list $lList [lindex $lSide 1] [lindex $lSide 2]]
+    }
+
+    ::mUtilMenu::Out "  Markers - [array size lPink] net(s) pink, [array size lGrey] net(s) grey, [llength $lBoxes] box(es) deep blue"
+
+    foreach lSide $lSides {
+        set lColor [lindex $lSide 1]
+        set lWord  [lindex $lSide 2]
+
+        foreach lRec [lindex $lSide 0] {
+            set lGrp [lindex $lRec 0]
+            if { ![info exists lSegs($lGrp)] } {
+                ::mUtilMenu::Trace "no wires on record for $lGrp - nothing to draw"
+                continue
+            }
+            set lN 0
+            foreach lSeg $lSegs($lGrp) {
+                if { [llength $lSeg] != 4 } {
+                    continue
+                }
+                set lAt [::mUtilMenu::OffsetSeg $lSeg $lOffset]
+                if { [catch { ::mUtilMenu::DrawPageLineOn $pPage \
+                                  [lrange $lAt 0 1] [lrange $lAt 2 3] \
+                                  $lColor $mChkLineWidth $mChkLineStyle } lErr] } {
+                    ::mUtilMenu::Trace "$lWord line for $lGrp at $lAt failed -> $lErr"
+                    incr lFailed
+                    continue
+                }
+                incr lN
+                incr lDrawn
+            }
+            ::mUtilMenu::Out [format "    %-4s net %-28s %d wire(s)" \
+                      $lWord [lindex $lRec 1] $lN]
+        }
+    }
+
+    foreach lEntry $lBoxes {
+        set lLabel [lindex $lEntry 0]
+        set lBox   [lindex $lEntry 1]
+        if { [catch { ::mUtilMenu::DrawPageBoxOn $pPage $lBox \
+                          $mChkBoxColor $mChkBoxWidth $mChkBoxStyle } lErr] } {
+            ::mUtilMenu::Trace "box for $lLabel at $lBox failed -> $lErr"
+            incr lFailed
+            continue
+        }
+        incr lDrawn
+        ::mUtilMenu::Out [format "    blue box %-28s (%s,%s)-(%s,%s)" $lLabel \
+                  [lindex $lBox 0] [lindex $lBox 1] [lindex $lBox 2] [lindex $lBox 3]]
+    }
+
+    # Once for the batch, not once per object - see DrawPageLineOn.
+    if { $lDrawn > 0 } {
+        ::mUtilMenu::MarkObjModified $pPage
+        catch { ZoomRedraw }
+    }
+    set lNote ""
+    if { $lFailed } {
+        set lNote ", $lFailed failed"
+    }
+    ::mUtilMenu::Out "    ($lDrawn object(s) drawn$lNote - File > Save to keep them, Undo to remove)"
+    return $lDrawn
+}
+
+# SCH_CHECK_ITEM2's markers: every wire of every net whose schematic-level name
+# was made unique, in PINK.
+#
+# Pink and nothing else - no grey and no box - because this finding has only one
+# side to it.  A near miss is a relationship between two things and needs two
+# colours to say which is which; a name conflict is one net being quietly renamed,
+# so there is exactly one thing to point at.  The other page's net of the same
+# name is the other half of the story, but it is on another page and cannot be
+# drawn on this one.
+#
+# pConf is what PageNameConflicts returned, and it is used for the early-out and
+# the count only.  The rows are re-tested here with the same predicate rather than
+# looked up by name, because a page label is NOT a unique key: two separate net
+# objects on one page can both carry the label +3.3VSB and be renamed to
+# +3.3VSB_9631 and +3.3VSB_9632: keying an array on the label collapses them to
+# one entry, and every line printed would then name whichever schematic net came
+# last.  Testing the row itself gives each net its own answer, and both of them
+# their wires - they are both the fault.
+#
+# Same colour, width, style and nudge as the grid check's pink, and the same
+# once-at-the-end MarkModified / ZoomRedraw.  Returns the number of lines drawn.
+proc ::mUtilMenu::MarkNameConflicts { pPage pDict pConf } {
+    variable mChkNetColor
+    variable mChkLineWidth
+    variable mChkLineStyle
+
+    if { [llength $pConf] == 0 } {
+        return 0
+    }
+
+    set lOffset [::mUtilMenu::MarkOffsetDoc $pPage]
+    set lDrawn  0
+    set lFailed 0
+
+    ::mUtilMenu::Out "  Markers - [llength $pConf] net(s) pink"
+
+    foreach lRow [dict get $pDict nets] {
+        set lLabel [lindex $lRow 0]
+        set lSch   [lindex $lRow 3]
+        if { [::mUtilMenu::NetNameConflictSuffix $lLabel $lSch] eq "" } {
+            continue
+        }
+
+        set lN 0
+        # Element 2 is the wires as {x1 y1 x2 y2} doc quads - see CollectPageNets.
+        foreach lSeg [lindex $lRow 2] {
+            if { [llength $lSeg] != 4 } {
+                continue
+            }
+            set lAt [::mUtilMenu::OffsetSeg $lSeg $lOffset]
+            if { [catch { ::mUtilMenu::DrawPageLineOn $pPage \
+                              [lrange $lAt 0 1] [lrange $lAt 2 3] \
+                              $mChkNetColor $mChkLineWidth $mChkLineStyle } lErr] } {
+                ::mUtilMenu::Trace "conflict line for $lLabel at $lAt failed -> $lErr"
+                incr lFailed
+                continue
+            }
+            incr lN
+            incr lDrawn
+        }
+        ::mUtilMenu::Out [format "    pink net %-28s %d wire(s)   (netlist: %s)" \
+                  $lLabel $lN $lSch]
+    }
+
+    if { $lDrawn > 0 } {
+        ::mUtilMenu::MarkObjModified $pPage
+        catch { ZoomRedraw }
+    }
+    set lNote ""
+    if { $lFailed } {
+        set lNote ", $lFailed failed"
+    }
+    ::mUtilMenu::Out "    ($lDrawn object(s) drawn$lNote - File > Save to keep them, Undo to remove)"
+    return $lDrawn
+}
+
+#-----------------------------------------------------------------------------
+# Running the check - one page, or every page under what the PM has selected
+#
+# Everything below is about scope.  The work on a single page has not changed:
+# grid block, page dump, near-miss search, markers.  What is new is that a
+# schematic, a .DSN or a .OPJ selected in the Project Manager means "do that to
+# every page under this", and that a page which came out marked gets a '*' in
+# front of its name so the Project Manager tree shows at a glance which pages
+# need looking at.
+#
+# The Command Window still gets everything.  The message box gets ONE table -
+# one line per page - and no longer repeats the page's Grid Reference settings:
+# on a 100-page design that would be 1200 lines of dialog, and even for one page
+# the grid block is reference material rather than a result.  It is still printed
+# to the Command Window for every page.
+#-----------------------------------------------------------------------------
+
+# {schematicObj pageObj} for every page of one DboSchematic, in database order.
+proc ::mUtilMenu::SchematicPageObjs { pSch } {
+    set lOut     [list]
+    set lNullObj NULL
+    set lStatus  [DboState]
+
+    catch {
+        set lIter [$pSch NewPagesIter $lStatus]
+        set lPage [$lIter NextPage $lStatus]
+        while { $lPage != $lNullObj } {
+            lappend lOut [list $pSch $lPage]
+            set lPage [$lIter NextPage $lStatus]
+        }
+        catch { delete_DboSchematicPagesIter $lIter }
+    }
+
+    catch { $lStatus -delete }
+    return $lOut
+}
+
+# The same for every schematic of one DboDesign - the OBJECT walk behind
+# GetDesignPages, which returns names.  Names would have to be looked up again
+# one page at a time, and each lookup is another walk of the whole design.
+proc ::mUtilMenu::DesignPageObjs { pDesign } {
+    set lOut     [list]
+    set lNullObj NULL
+    set lStatus  [DboState]
+
+    catch {
+        set lIter [$pDesign NewViewsIter $lStatus $::IterDefs_SCHEMATICS]
+        set lView [$lIter NextView $lStatus]
+        while { $lView != $lNullObj } {
+            # dynamic cast DboView -> DboSchematic, per PDF 3.2.7
+            foreach lPair [::mUtilMenu::SchematicPageObjs [DboViewToDboSchematic $lView]] {
+                lappend lOut $lPair
+            }
+            set lView [$lIter NextView $lStatus]
+        }
+        catch { delete_DboLibViewsIter $lIter }
+    }
+
+    catch { $lStatus -delete }
+    return $lOut
+}
+
+# Turn one classified PM selection into the pages to check, as {schObj pageObj}
+# pairs.  pKind / pWhat are what ClassifyPMItem returned; pDsn is the active
+# design's file, which is the only way in for a .OPJ - a project node names no
+# design of its own, so the design the PM has open is the design it means.
+#
+# Returns {} for anything that resolves to no pages, which the caller reports as
+# itself rather than as an empty run.
+proc ::mUtilMenu::PagesForPMItem { pKind pWhat pDsn } {
+    switch -- $pKind {
+        page {
+            if { ![::mUtilMenu::BindDboHandle $pWhat DboPage] } {
+                return [list]
+            }
+            # The schematic comes off the page, so a single page needs no context
+            # passed in either (DboPage::GetOwner, Appendix A).
+            set lSch ""
+            catch { set lSch [$pWhat GetOwner] }
+            return [list [list $lSch $pWhat]]
+        }
+        schematic {
+            if { ![::mUtilMenu::BindDboHandle $pWhat DboSchematic] } {
+                return [list]
+            }
+            return [::mUtilMenu::SchematicPageObjs $pWhat]
+        }
+        design {
+            # Either a SWIG handle or a path, depending on what the PM label was.
+            set lDesign ""
+            if { [::mUtilMenu::PMItemDboClass $pWhat] ne "" } {
+                if { [::mUtilMenu::BindDboHandle $pWhat DboDesign] } {
+                    set lDesign $pWhat
+                }
+            } else {
+                catch { set lDesign [::mUtilMenu::FindDesign $pWhat] }
+            }
+            if { $lDesign eq "" || $lDesign eq "NULL" } {
+                return [list]
+            }
+            return [::mUtilMenu::DesignPageObjs $lDesign]
+        }
+        project {
+            if { $pDsn eq "" } {
+                return [list]
+            }
+            set lDesign ""
+            catch { set lDesign [::mUtilMenu::FindDesign $pDsn] }
+            if { $lDesign eq "" || $lDesign eq "NULL" } {
+                return [list]
+            }
+            return [::mUtilMenu::DesignPageObjs $lDesign]
+        }
+    }
+    return [list]
+}
+
+# SCH_CHECK_ITEM2's test, on ONE net.  Returns the serial-number suffix Capture
+# added - "_9631" - or "" when this net is not that case.
+#
+# The fault it names: two pages each carry a wire labelled +3.3VSB, and nothing
+# joins them - no Off-Page Connector, no Power symbol, no Port.  Capture will not
+# weld two nets together just because their labels match, so it keeps them apart
+# and makes the schematic-level names unique by hanging a serial number off one of
+# them.  The page still says +3.3VSB; the netlist says +3.3VSB_9631.  Almost
+# always that means somebody meant the two to be one net and left the connector
+# off, which is why the report says "may conflict" and not "is wrong": a genuinely
+# local net that happens to share a name is legal, just rare.
+#
+# The test is exactly "schematic name is the page label, an underscore, and then
+# nothing but digits".  It is deliberately spelled with string commands rather
+# than a regexp: a net label is user text and routinely contains regexp
+# metacharacters - +3.3VSB starts with one, and bus members like D[0] are all
+# brackets - so building a pattern out of one would need escaping that is easy to
+# get subtly wrong and hard to notice.
+#
+#   +3.3VSB   +3.3VSB_9631   -> _9631   the finding
+#   +3.3VSB   +3.3VSB        -> ""      one net, nothing renamed
+#   +3.3VSB   VCC_CORE       -> ""      not a rename at all, some other naming
+#   +3.3VSB   +3.3VSB_A      -> ""      not a serial number
+#   +3.3VSB   ""             -> ""      no schematic net to compare against
+proc ::mUtilMenu::NetNameConflictSuffix { pLabel pSchName } {
+    if { $pLabel eq "" || $pSchName eq "" || $pSchName eq $pLabel } {
+        return ""
+    }
+
+    set lPrefix "${pLabel}_"
+    if { [string first $lPrefix $pSchName] != 0 } {
+        return ""
+    }
+
+    set lTail [string range $pSchName [string length $lPrefix] end]
+    if { $lTail eq "" || ![string is digit -strict $lTail] } {
+        return ""
+    }
+    return "_$lTail"
+}
+
+# Every net on one page whose schematic-level name was made unique that way, as
+# rows of {pageLabel schematicName suffix}, in page-label order.
+#
+# pDict is the dump DumpPageInfoOn just returned, so this costs no database calls
+# at all: element 3 of a net row is already the schematic name - CollectPageNets
+# read it while it was walking the nets anyway.  That is the whole reason both
+# checks share one dump when both boxes are ticked.
+proc ::mUtilMenu::PageNameConflicts { pDict } {
+    set lRows [list]
+
+    foreach lRow [dict get $pDict nets] {
+        set lLabel [lindex $lRow 0]
+        set lSch   [lindex $lRow 3]
+        set lSfx   [::mUtilMenu::NetNameConflictSuffix $lLabel $lSch]
+        if { $lSfx ne "" } {
+            lappend lRows [list $lLabel $lSch $lSfx]
+        }
+    }
+    return [lsort -dictionary -index 0 $lRows]
+}
+
+# Check ONE page.  Returns
+# {schName pageName pairs drawn starred status nets conflicts confDrawn}:
+#
+#   pairs    how many near misses the grid search found
+#   drawn    how many GRID marker objects went onto the page
+#   starred  1 when this run put the '*' on the page name
+#   status   "" when all went well, else what went wrong, for the table
+#   nets     the names of the nets involved in the near misses, sorted and
+#            deduplicated - what the report lists under the page, so the reviewer
+#            knows which nets to look at before opening it
+#   conflicts  PageNameConflicts' rows - the SCH_CHECK_ITEM2 findings
+#   confDrawn  how many pink lines those findings put on the page
+#
+# The two drawn counts are kept apart rather than added up because they are
+# reported under their own checks, and a run with only one check ticked must not
+# be handed a total that includes the other one's markers.
+#
+# pModes is which checks were asked for, as mChkModes values:
+#
+#   grid       the near-miss search, the markers and the '*'.  Needs the FULL
+#              dump, and every pin's position with it (mPinPosAll), because the
+#              thing a net can stop short of is usually a pin.
+#   globalref  the net-name check, and a pink line over every wire of every net it
+#              finds.  Needs the nets and nothing else, so on its own it dumps
+#              only the nets section and leaves mPinPosAll alone - which is most
+#              of the cost of a page, not a small saving.  It does NOT rename the
+#              page: the '*' is the grid check's marker for "this page has
+#              geometry to look at", and the report already names the pages.
+#
+# pStar 0 draws the markers but leaves the page NAME alone.  That is what a single
+# page picked in the Project Manager gets, and the reason is what the '*' is for:
+# it is a way of finding the marked pages again in a tree of forty.  Someone who
+# selected one page is already looking at the page they asked about, so the '*'
+# tells them nothing - and it costs a rename of their design, on every run, for
+# nothing.  A schematic, a .DSN or a .OPJ still stars, because there the tree IS
+# the answer.  RunSchematicCheck decides which from the scope it was given.
+#
+# Both together are ONE dump and one walk, not two: the grid check's dump already
+# carries the schematic net names the name check reads.
+#
+# Nothing here decides whether the Command Window hears about it: the caller sets
+# mQuiet around the whole call.  A single page selected in the Project Manager is
+# run loud (the dump IS the answer for one page); a schematic, a design or a
+# project is run silent, because forty pages of dump is minutes of printing for
+# an answer the message box already carries.  See RunSchematicCheck.
+proc ::mUtilMenu::CheckOnePage { pSch pPage {pModes {grid}} {pStar 1} } {
+    variable mPinPosAll
+    variable mGridMinDis
+    variable mChkMark
+
+    set lDoGrid [expr { [lsearch -exact $pModes grid]      != -1 }]
+    set lDoName [expr { [lsearch -exact $pModes globalref] != -1 }]
+
+    set lPageName [::mUtilMenu::CStr $pPage GetName]
+    set lSchName  ""
+    set lDsn      ""
+    if { $pSch ne "" && $pSch ne "NULL" } {
+        set lSchName [::mUtilMenu::CStr $pSch GetName]
+    } else {
+        catch { set lSchName [::mUtilMenu::CStr [$pPage GetOwner] GetName] }
+    }
+    catch { set lDsn [::mUtilMenu::CStr [$pPage GetContainingLib] GetName] }
+
+    # The grid block first: it is cheap, and if the dump then dies on a page this
+    # file has not seen before, what the page IS has already been said.  Every
+    # Out below is a no-op when the caller has asked for silence.  It is the grid
+    # check's material, so a name-only run does not print it.
+    ::mUtilMenu::Out "================================================================"
+    ::mUtilMenu::Out [::mUtilMenu::Banner "Schematic Check - [file tail $lDsn] - [::mUtilMenu::OrDash $lSchName] / [::mUtilMenu::OrDash $lPageName]"]
+    ::mUtilMenu::Out "================================================================"
+    if { $lDoGrid } {
+        foreach lLine [split [::mUtilMenu::FormatPageGrid \
+                                  [::mUtilMenu::CollectPageGrid $pPage]] "\n"] {
+            ::mUtilMenu::Out "  $lLine"
+        }
+        ::mUtilMenu::Out "----------------------------------------------------------------"
+    }
+
+    ::mUtilMenu::TimeReset
+    set lT [::mUtilMenu::TimeNow]
+
+    # Every pin's position, wired or not - this is the one thing Schematic Check
+    # asks the database for that Schematic Compare does not.  Restored on the way
+    # out whatever happens, so a dump that dies cannot leave Compare paying for a
+    # walk it never asked for.  See mPinPosAll.
+    set lWhat [list parts symbols nets buses]
+    if { !$lDoGrid } {
+        set lWhat [list nets]
+    }
+    set lSavePos $mPinPosAll
+    if { $lDoGrid } {
+        set mPinPosAll 1
+    }
+    set lDict   [list]
+    set lFailed [catch { set lDict [::mUtilMenu::DumpPageInfoOn $pPage $lWhat] } lErr]
+    set mPinPosAll $lSavePos
+
+    if { $lFailed } {
+        ::mUtilMenu::Trace "page dump failed on [::mUtilMenu::OrDash $lPageName] -> $lErr"
+        return [list $lSchName $lPageName 0 0 0 "dump failed" [list] [list] 0]
+    }
+
+    # SCH_CHECK_ITEM2, off the dump that is already in hand - no second walk, and
+    # it runs BEFORE the grid search so that a search that falls over still leaves
+    # the name findings to report.  The test itself cannot fail (it is string work
+    # over a list); the drawing can, and is caught the same way the grid check's
+    # markers are - a page that refuses a graphic object still gets reported.
+    set lConf   [list]
+    set lConfDr 0
+    if { $lDoName } {
+        set lConf [::mUtilMenu::PageNameConflicts $lDict]
+        if { [llength $lConf] > 0 } {
+            ::mUtilMenu::Out "----------------------------------------------------------------"
+            ::mUtilMenu::Out "  Nets name may conflict:"
+            foreach lC $lConf {
+                ::mUtilMenu::Out "    Page name: [lindex $lC 0] ([lindex $lC 1])"
+            }
+            if { $mChkMark } {
+                if { [catch { set lConfDr [::mUtilMenu::MarkNameConflicts \
+                                  $pPage $lDict $lConf] } lErrC] } {
+                    ::mUtilMenu::Trace "MarkNameConflicts failed on [::mUtilMenu::OrDash $lPageName] -> $lErrC"
+                    set lConfDr 0
+                }
+            }
+        }
+    }
+
+    if { !$lDoGrid } {
+        ::mUtilMenu::TimeReport "Schematic Check, one page" $lT
+        return [list $lSchName $lPageName 0 0 0 "" [list] $lConf $lConfDr]
+    }
+
+    # The main event, and it runs on the dump's own rows - see the proc.  Its own
+    # failure is caught separately from the dump's: the dump is the material, and
+    # a dump that came out is worth keeping on screen even if the search over it
+    # then falls over.
+    ::mUtilMenu::Out "----------------------------------------------------------------"
+    set lFinds [list]
+    if { [catch { set lFinds [::mUtilMenu::Search_Missing_connection_onGrid \
+                                  $pPage $lDict $mGridMinDis] } lErr2] } {
+        ::mUtilMenu::Trace "Search_Missing_connection_onGrid failed -> $lErr2"
+        return [list $lSchName $lPageName 0 0 0 "search failed" [list] $lConf $lConfDr]
+    }
+
+    # Which nets the findings are about.  Element 1 of a finding is always a net
+    # endpoint; element 2 is one too when two nets nearly met, and then both names
+    # belong in the list - "VCCM_EN_A1 nearly touches N44011769" is one problem
+    # naming two nets, and a reviewer wants to find either of them.
+    set lNets [list]
+    foreach lF $lFinds {
+        foreach lSide [list [lindex $lF 1] [lindex $lF 2]] {
+            if { [lindex $lSide 0] ne "NET" } {
+                continue
+            }
+            set lName [lindex $lSide 1]
+            if { $lName ne "" && [lsearch -exact $lNets $lName] == -1 } {
+                lappend lNets $lName
+            }
+        }
+    }
+    set lNets [lsort -dictionary $lNets]
+
+    # Draw them, then star the page.  Both are caught on their own: the search's
+    # answer is already printed by the time either runs, and a page that refuses
+    # a graphic object or a rename should not take the report down with it.  The
+    # tolerance is re-resolved rather than threaded out of the search - one Dbo
+    # call, and it keeps the search's return value about findings only.
+    set lDrawn   0
+    set lStarred 0
+    set lStatus  ""
+    if { $mChkMark && [llength $lFinds] > 0 } {
+        if { [catch { set lDrawn [::mUtilMenu::MarkGridFindings $pPage \
+                          $lDict $lFinds \
+                          [::mUtilMenu::GridTolDoc $pPage $mGridMinDis]] } lErr3] } {
+            ::mUtilMenu::Trace "MarkGridFindings failed on [::mUtilMenu::OrDash $lPageName] -> $lErr3"
+            set lStatus "not marked"
+        }
+        if { $lDrawn > 0 && !$pStar } {
+            # One page picked in the Project Manager - see pStar.  The markers go
+            # on, the name does not change.
+            ::mUtilMenu::Trace "  single page - markers drawn, page name left alone"
+        } elseif { $lDrawn > 0 } {
+            # '*' on the page name, so the PM tree says which pages to open.
+            # A page checked twice keeps its one '*' - StarPageObj refuses to add
+            # a second, and that is not a failure to report as one.
+            if { [string index $lPageName 0] eq "*" } {
+                set lStatus "already '*'"
+            } elseif { [catch { set lStarred \
+                            [::mUtilMenu::StarPageObj $pSch $pPage] } lErr4] } {
+                ::mUtilMenu::Trace "StarPageObj failed -> $lErr4"
+                set lStatus "'*' not added"
+            } elseif { $lStarred } {
+                set lPageName [::mUtilMenu::CStr $pPage GetName]
+            } else {
+                set lStatus "'*' not added"
+            }
+        }
+    }
+
+    ::mUtilMenu::TimeReport "Schematic Check, one page" $lT
+    return [list $lSchName $lPageName [llength $lFinds] $lDrawn $lStarred $lStatus \
+                 $lNets $lConf $lConfDr]
+}
+
+# The net names of one page's findings, as one line for the message box, capped
+# so a page with sixty involved nets does not push the totals off the screen.
+proc ::mUtilMenu::NetListStr { pNets pMax } {
+    if { [llength $pNets] == 0 } {
+        return ""
+    }
+    if { $pMax <= 0 || [llength $pNets] <= $pMax } {
+        return [join $pNets {, }]
+    }
+    return "[join [lrange $pNets 0 [expr { $pMax - 1 }]] {, }], ... (+[expr { [llength $pNets] - $pMax }] more)"
+}
+
+# Check every page in pPairs and put up ONE message box for the lot.
+#
+# pWhat is what the user picked, for the dialog's first line ("Design W980_WS.DSN"),
+# so the report says what it covered as well as what it found.
+#
+# pLoud 1 lets the per-page detail through to the Command Window, which is what a
+# single selected page wants: for one page the dump and the search listing ARE the
+# answer.  pLoud 0 silences the whole loop - a schematic, a design or a project is
+# tens of thousands of lines of dump for a result the message box already carries,
+# and printing them costs far more time than the search does.  Only this summary
+# is printed either way.
+#
+# pModes is which checks are ticked - see CheckOnePage.  It goes through to every
+# page, and it also decides what the report says: a run that was never asked to
+# look for near misses must not end on "no page has a near miss", and one that was
+# never asked about names must not claim the names are clean.  Each section is
+# printed only by the check that produced it.
+#
+# pKind is what the Project Manager had selected - page / schematic / design /
+# project - and it decides the two things that are about the SHAPE of the run
+# rather than about the checks:
+#
+#   the '*'     only a multi-page scope stars.  See CheckOnePage's pStar.
+#   progress    only a multi-page scope prints "... has finished".  For one page
+#               there is nothing to make progress through, and the dump is already
+#               going past on screen.
+#
+# It is passed rather than inferred from pLoud, which would be wrong: pLoud is 1
+# for a single page but ALSO for a whole design when mChkBatchDetail is on, and
+# that design must still star its pages.
+proc ::mUtilMenu::RunSchematicCheck { pPairs pWhat {pLoud 1} {pModes {grid}} \
+                                      {pKind "page"} } {
+    variable mGridMinDis
+    variable mGridMinDisUnits
+    variable mChkMark
+    variable mGridListMax
+    variable mChkNetListMax
+    variable mQuiet
+
+    set lDoGrid [expr { [lsearch -exact $pModes grid]      != -1 }]
+    set lDoName [expr { [lsearch -exact $pModes globalref] != -1 }]
+
+    # One page = leave the name alone and say nothing per page; anything wider =
+    # star the pages and report progress.  Both fall out of the same test, because
+    # both answer the same question: is there a tree of pages to find your way
+    # around afterwards, and a wait to sit through while it is built?
+    set lMulti [expr { $pKind ne "page" }]
+
+    set lRows  [list]
+    set lTotP  0
+    set lTotD  0
+    set lTotS  0
+    set lTotC  0
+    set lTotCD 0
+    set lT0    [clock milliseconds]
+
+    # One switch around the whole loop rather than a flag threaded through every
+    # proc under it: Out is the single door to the Command Window, and mQuiet is
+    # its lock.  Restored whatever happens, so a page that throws cannot leave the
+    # rest of the session silent.
+    set lSaveQuiet $mQuiet
+    if { !$pLoud } {
+        set mQuiet 1
+    }
+    set lErr ""
+    if { [catch {
+        set lNth 0
+        foreach lPair $pPairs {
+            incr lNth
+            set lRec [::mUtilMenu::CheckOnePage [lindex $lPair 0] [lindex $lPair 1] \
+                                                $pModes $lMulti]
+            lappend lRows $lRec
+            incr lTotP [lindex $lRec 2]
+            incr lTotD [lindex $lRec 3]
+            incr lTotS [lindex $lRec 4]
+            incr lTotC  [llength [lindex $lRec 7]]
+            incr lTotCD [lindex $lRec 8]
+
+            # Progress, through mQuiet - see OutAlways.  The counter is on the
+            # line because "PAGE7 has finished" on its own does not say whether
+            # there are two more of these or ninety.  The page name is taken from
+            # the record rather than from the pair, so a page that was just
+            # renamed '*' is reported under the name it now has.
+            if { $lMulti } {
+                ::mUtilMenu::OutAlways [format "%s / %s has finished... (%d/%d)" \
+                    [::mUtilMenu::OrDash [lindex $lRec 0]] \
+                    [::mUtilMenu::OrDash [lindex $lRec 1]] \
+                    $lNth [llength $pPairs]]
+            }
+        }
+    } lErr] } {
+        set mQuiet $lSaveQuiet
+        ::mUtilMenu::Trace "Schematic Check stopped after [llength $lRows] page(s) -> $lErr"
+    }
+    set mQuiet $lSaveQuiet
+    set lMs [expr { [clock milliseconds] - $lT0 }]
+
+    # The same report twice, Command Window and message box, built once.
+    set lTxt ""
+    append lTxt "[::mUtilMenu::Banner {Schematic Check}] - $pWhat\n"
+    if { $lDoGrid } {
+        append lTxt "min_dis $mGridMinDis $mGridMinDisUnits"
+        if { !$mChkMark } {
+            append lTxt "   (mChkMark 0 - reporting only, nothing drawn)"
+        }
+        append lTxt "\n"
+    }
+    append lTxt "\n"
+
+    # SCH_CHECK_ITEM1 - one block per page that has something to say: the page
+    # name, then the nets involved.  Those two are the whole point of the dialog -
+    # which page to open, and what to look for once it is open.
+    set lShown  0
+    set lHidden 0
+    if { $lDoGrid } {
+        append lTxt "NETs not on Grid:\n"
+        foreach lRec $lRows {
+            # Pages with nothing to say are counted, not listed.
+            if { [lindex $lRec 2] == 0 && [lindex $lRec 5] eq "" } {
+                incr lHidden
+                continue
+            }
+            if { $mGridListMax > 0 && $lShown >= $mGridListMax } {
+                incr lHidden
+                continue
+            }
+            incr lShown
+
+            set lNote [lindex $lRec 5]
+            if { $lNote ne "" } {
+                set lNote "   ($lNote)"
+            }
+            append lTxt [format "  %s / %s   -   %d pair(s), %d marked%s\n" \
+                             [::mUtilMenu::OrDash [lindex $lRec 0]] \
+                             [::mUtilMenu::OrDash [lindex $lRec 1]] \
+                             [lindex $lRec 2] [lindex $lRec 3] $lNote]
+
+            set lNets [lindex $lRec 6]
+            if { [llength $lNets] > 0 } {
+                append lTxt "      nets:  [::mUtilMenu::NetListStr $lNets $mChkNetListMax]\n"
+            }
+        }
+        if { $lShown == 0 } {
+            # Nothing to list at all - "no page has a near miss" says it, and a
+            # second line counting the pages that are not listed would be counting
+            # every page that was just checked.
+            append lTxt "  (no page has a near miss)\n"
+        } elseif { $lHidden > 0 } {
+            append lTxt "  ... [expr { [llength $lRows] - $lShown }] page(s) not listed - nothing found on them\n"
+        }
+        append lTxt "\n"
+    }
+
+    # SCH_CHECK_ITEM2 - the net names Capture had to make unique.  Same two-level
+    # shape as the block above and capped the same two ways: mGridListMax pages,
+    # mChkNetListMax nets under any one of them, so a design where every page has
+    # the fault cannot push the totals off the bottom of the box.
+    if { $lDoName } {
+        append lTxt "Nets name may conflict:\n"
+        set lCShown  0
+        set lCPages  0
+        foreach lRec $lRows {
+            set lConf [lindex $lRec 7]
+            if { [llength $lConf] == 0 } {
+                continue
+            }
+            incr lCPages
+            if { $mGridListMax > 0 && $lCShown >= $mGridListMax } {
+                continue
+            }
+            incr lCShown
+
+            append lTxt [format "  %s / %s   -   %d net name(s), %d marked\n" \
+                             [::mUtilMenu::OrDash [lindex $lRec 0]] \
+                             [::mUtilMenu::OrDash [lindex $lRec 1]] \
+                             [llength $lConf] [lindex $lRec 8]]
+
+            set lN 0
+            foreach lC $lConf {
+                incr lN
+                if { $mChkNetListMax > 0 && $lN > $mChkNetListMax } {
+                    append lTxt "      ... (+[expr { [llength $lConf] - $mChkNetListMax }] more)\n"
+                    break
+                }
+                append lTxt "      Page name: [lindex $lC 0] ([lindex $lC 1])\n"
+            }
+        }
+        if { $lCPages == 0 } {
+            append lTxt "  (no net name was made unique - nothing to look at)\n"
+        } elseif { $lCPages > $lCShown } {
+            append lTxt "  ... [expr { $lCPages - $lCShown }] more page(s) not listed\n"
+        }
+        append lTxt "\n"
+    }
+
+    append lTxt [format "%d page(s) checked in %d ms:" [llength $lRows] $lMs]
+    if { $lDoGrid } {
+        append lTxt [format "  %d pair(s), %d object(s) drawn" $lTotP $lTotD]
+        # Only where starring was on the table.  A single page never stars, and
+        # "0 page(s) renamed '*'" would read as a rename that failed.
+        if { $lMulti } {
+            append lTxt [format ", %d page(s) renamed '*'" $lTotS]
+        }
+    }
+    if { $lDoName } {
+        append lTxt [format "  %d net name(s) may conflict, %d object(s) drawn" \
+                         $lTotC $lTotCD]
+    }
+    append lTxt "\n"
+    if { $lErr ne "" } {
+        append lTxt "STOPPED after [llength $lRows] page(s): $lErr\n"
+    }
+    if { $lDoGrid && $lTotD > 0 } {
+        append lTxt "\npink = the net that stops short   grey = the other net\n"
+        append lTxt "blue = box round the part / symbol / bus end it misses\n"
+    }
+    if { $lDoName && $lTotC > 0 } {
+        append lTxt "\n\"Page name: A (B)\" = the page draws A, the netlist sees B.\n"
+        append lTxt "Another page has its own A and nothing joins the two - add an\n"
+        append lTxt "Off-Page Connector, a Power symbol or a Port if they are one net.\n"
+        if { $lTotCD > 0 } {
+            append lTxt "pink = every wire of a net whose name was made unique.\n"
+        }
+    }
+    if { $lTotD > 0 || $lTotCD > 0 } {
+        append lTxt "\nFile > Save to keep the markers"
+        if { $lDoGrid && $lTotS > 0 } {
+            append lTxt " and the '*' names"
+        }
+        append lTxt ", Undo to remove them.\n"
+    }
+    if { $pLoud } {
+        append lTxt "\n(per-page detail in the Command Window)"
+    } else {
+        append lTxt "\n(select a single page for the full dump in the Command Window)"
+    }
+
+    ::mUtilMenu::Out "================================================================"
+    foreach lLine [split $lTxt "\n"] {
+        ::mUtilMenu::Out $lLine
+    }
+    ::mUtilMenu::Out "================================================================"
+
+    # The report goes in the read-only text window, not capDisplayMessageBox: the
+    # message box is modal and its text cannot be selected, so a list of thirty
+    # net names was something you could only read and retype.  This one is a text
+    # widget - drag and Ctrl-C, or the Copy button with nothing selected to take
+    # the whole report at once.  Same window Schematic Compare answers in; it is
+    # rebuilt per run, so a second Check replaces the first report rather than
+    # hiding behind it.  Its Close closes the report only - Schematic Check has no
+    # page selector standing behind it.  See ShowResultWindow.
+    ::mUtilMenu::ShowResultWindow "Schematic Check - [::mUtilMenu::VerStr]" $lTxt \
+        "::mUtilMenu::CloseResultWindow"
+    return true
+}
+
+#-----------------------------------------------------------------------------
+# The check dialog - which checks, before any checking happens
+#
+# The menu item used to start work the moment it was clicked.  It now asks which
+# checks first, because "check this schematic" is not one question: a net that
+# stopped half a grid step short of a pin and a net that shares its name with
+# another page's net without an off-page connector between them are two different
+# faults, found two different ways, at two very different costs.
+#
+# The boxes are CHECKBOXES, not radio buttons: the faults are not alternatives, a
+# design can have both, and being made to run the tool twice to find that out
+# would be worse than the one extra walk.  Both are ticked by default.
+#
+# Every box is bound straight to its own global - SCH_CHECK_ITEM1 for the grid
+# check, SCH_CHECK_ITEM2 for the global-reference check - so the tick IS the
+# variable.  1 = ticked, 0 = not.  Both directions work: ticking a box sets the
+# global, and setting the global from the Command Window moves the tick on an
+# open dialog.  mChkModes element 2 is what names them.
+#
+#   ChkItemsNormalize              force the two globals to a clean 0 or 1
+#   ChkItemsSelected               the ticked modes, in mChkModes order
+#   RunSchematicCheckSelected      run all of them in one pass over the pages
+#   RunSchematicCheckMode          one named check, for the Command Window
+#   RunSchematicCheckOnSelection   resolve the PM selection, then run the modes
+#   DoSchematicCheck               the menu callback: build/raise the dialog
+#   DoSchematicCheckStart          Start: close the dialog, then run the ticks
+#   CloseSchematicCheck            Close / X / Escape: destroy, run nothing
+#
+# Ticking both is ONE pass, not two.  The list of ticked modes goes all the way
+# down to CheckOnePage, so a page is dumped once and asked both questions off the
+# one dump - the schematic net names the name check reads are already in the net
+# rows the grid check's dump produced.  Ticking only the name check dumps just the
+# nets section and skips the pin walk, which is most of the cost of a page.
+#
+# The dialog is closed BEFORE the checks run, not after: a check ends in a
+# message box, and a Tk toplevel left standing sits in front of it.  Same order
+# DoSchematicCompareExecute uses.
+#-----------------------------------------------------------------------------
+
+# The two globals, forced to a clean 0 or 1.  They are public and writable from
+# the Command Window, which is the point of them, so "1", "yes", "" and unset are
+# all things they can be found holding; -onvalue/-offvalue only ever produce 0/1
+# once a box has been clicked, and before that nothing has.
+#
+#   unset, 0, "", "no", "false"   -> 0
+#   1, "yes", "true", any number  -> 1
+#   anything expr cannot read     -> 1
+#
+# A string expr will not take as a boolean ticks the box rather than silently
+# turning the check off: someone who typed it meant to ask for the check.
+proc ::mUtilMenu::ChkItemsNormalize { } {
+    variable mChkModes
+
+    foreach lRow $mChkModes {
+        set lVar ::[lindex $lRow 2]
+        set lOn  0
+        if { [info exists $lVar] } {
+            if { [catch { set lOn [expr { [set $lVar] ? 1 : 0 }] }] } {
+                set lOn 1
+            }
+        }
+        set $lVar $lOn
+    }
+}
+
+# Which checks are ticked, as mChkModes values in the order the dialog shows
+# them, so a run is always grid-then-globalref no matter which box was clicked
+# first.
+proc ::mUtilMenu::ChkItemsSelected { } {
+    variable mChkModes
+
+    ::mUtilMenu::ChkItemsNormalize
+
+    set lModes [list]
+    foreach lRow $mChkModes {
+        if { [set ::[lindex $lRow 2]] } {
+            lappend lModes [lindex $lRow 0]
+        }
+    }
+    return $lModes
+}
+
+# One named check on its own, against whatever the Project Manager has selected.
+# Nothing in the menu path uses this - Start goes through the ticked boxes - but
+# it is the one-liner for running a single check from the Command Window:
+#
+#   ::mUtilMenu::RunSchematicCheckMode globalref
+#
+# and it is what keeps "a mode" a thing this file has a name for, rather than
+# something only the dialog can express.
+proc ::mUtilMenu::RunSchematicCheckMode { pMode } {
+    variable mChkModes
+
+    set lLabel ""
+    foreach lRow $mChkModes {
+        if { [lindex $lRow 0] eq $pMode } {
+            set lLabel [lindex $lRow 1]
+        }
+    }
+    if { $lLabel eq "" } {
+        ::mUtilMenu::Trace "unknown Schematic Check mode '$pMode'"
+        catch { capDisplayMessageBox "Unknown Schematic Check mode:  $pMode" \
+                                     "Schematic Check" }
+        return true
+    }
+
+    ::mUtilMenu::Trace "Schematic Check mode '$pMode' - $lLabel"
+    return [::mUtilMenu::RunSchematicCheckOnSelection [list $pMode]]
+}
+
+# Every ticked check, in dialog order, in ONE pass over the pages.
+#
+# Not a loop calling RunSchematicCheckMode per tick, which is what this was while
+# only one check existed: two ticks would then mean reading the Project Manager
+# selection twice, walking every page twice, and answering in two message boxes
+# that each knew half of it.  The list of ticked modes goes down to CheckOnePage
+# instead, and one page is dumped once and asked both questions.
+#
+# Nothing ticked is not an error worth a box of its own here - DoSchematicCheckStart
+# catches that case before the dialog is taken down, which is the only place a
+# user can cause it.
+proc ::mUtilMenu::RunSchematicCheckSelected { } {
+    set lModes [::mUtilMenu::ChkItemsSelected]
+
+    ::mUtilMenu::Trace "Schematic Check - running [llength $lModes] check(s): $lModes"
+    if { [llength $lModes] == 0 } {
+        ::mUtilMenu::Out "Schematic Check - no check is ticked (SCH_CHECK_ITEM1 and SCH_CHECK_ITEM2 are both 0)"
+        return true
+    }
+
+    return [::mUtilMenu::RunSchematicCheckOnSelection $lModes]
+}
+
+proc ::mUtilMenu::CloseSchematicCheck { } {
+    variable mChkWin
+    catch { destroy $mChkWin }
+}
+
+# Start: take the dialog down, then run every ticked check.  With nothing ticked
+# there is nothing to take it down for, so it stays up and says so - the box is
+# the only thing that could have got the user here.
+proc ::mUtilMenu::DoSchematicCheckStart { } {
+    if { [llength [::mUtilMenu::ChkItemsSelected]] == 0 } {
+        catch { capDisplayMessageBox \
+            "Please tick at least one check." "Schematic Check" }
+        return true
+    }
+
+    ::mUtilMenu::CloseSchematicCheck
+    return [::mUtilMenu::RunSchematicCheckSelected]
+}
+
 proc ::mUtilMenu::DoSchematicCheck { pVia } {
+    variable mChkWin
+    variable mChkModes
+
     ::mUtilMenu::Trace "Schematic Check callback reached via $pVia"
+    ::mUtilMenu::ChkItemsNormalize
+
+    # No Tk, no dialog.  A menu item that does nothing at all would be worse than
+    # one that runs whatever the two globals already say, so this falls through to
+    # them and says so in the Command Window - the same fallback shape
+    # ShowResultWindow takes when it cannot build its window.
+    if { [catch { package require Tk } lErr] } {
+        ::mUtilMenu::Out "mUtil: Tk is not available ($lErr) - running Schematic Check from SCH_CHECK_ITEM1=$::SCH_CHECK_ITEM1 SCH_CHECK_ITEM2=$::SCH_CHECK_ITEM2 without the dialog"
+        return [::mUtilMenu::RunSchematicCheckSelected]
+    }
+
+    ::mUtilMenu::HideTkRoot
+
+    # Already open - bring it forward rather than building a second copy.
+    if { [winfo exists $mChkWin] } {
+        catch {
+            wm deiconify $mChkWin
+            raise $mChkWin
+            focus $mChkWin
+        }
+        return true
+    }
+
+    toplevel $mChkWin
+    wm title $mChkWin "Schematic Check"
+    wm resizable $mChkWin 1 0
+    wm protocol $mChkWin WM_DELETE_WINDOW "::mUtilMenu::CloseSchematicCheck"
+
+    # Owned by the Capture main window so it cannot get lost behind it -
+    # SetAppWindowAsParent, PDF p.134, same as the Schematic Compare dialog.
+    catch { SetAppWindowAsParent [expr { [winfo id $mChkWin] }] }
+
+    set lBody $mChkWin.body
+    frame $lBody -padx 10 -pady 10
+    pack $lBody -side top -fill both -expand 1
+
+    label $lBody.hdr -anchor w -justify left \
+        -text "Check what the Project Manager has selected for:"
+    pack $lBody.hdr -side top -fill x -pady {0 6}
+
+    # One checkbutton per mChkModes row, each on its own global, so the tick and
+    # the variable are the same thing and Start reads the answer straight out of
+    # them.  -onvalue/-offvalue are spelled out because Tk's defaults are 1 and 0
+    # only by convention and this file is what promises they are 1 and 0.
+    set lN 0
+    foreach lRow $mChkModes {
+        incr lN
+        checkbutton $lBody.mode$lN -anchor w -justify left \
+            -text [lindex $lRow 1] \
+            -onvalue 1 -offvalue 0 \
+            -variable ::[lindex $lRow 2]
+        pack $lBody.mode$lN -side top -fill x -pady 2
+    }
+
+    # bottom: Start / Close
+    set lBtns $mChkWin.btns
+    frame $lBtns -padx 10
+    pack $lBtns -side bottom -fill x
+
+    button $lBtns.start -text "Start" -width 12 -default active \
+        -command "::mUtilMenu::DoSchematicCheckStart"
+    button $lBtns.close -text "Close" -width 12 \
+        -command "::mUtilMenu::CloseSchematicCheck"
+
+    pack $lBtns.close -side right -padx {6 0} -pady {4 10}
+    pack $lBtns.start -side right          -pady {4 10}
+
+    bind $mChkWin <Return> "::mUtilMenu::DoSchematicCheckStart"
+    bind $mChkWin <Escape> "::mUtilMenu::CloseSchematicCheck"
+
+    focus $lBtns.start
+    return true
+}
+
+# Work out WHAT the Project Manager has selected, then run pModes over every page
+# under it.  This is the whole of the scope resolution, and it is shared: which
+# checks are running changes what CheckOnePage does with a page, never which pages
+# there are.
+#
+# pModes defaults to the grid check alone, which is what this proc was before
+# there was more than one check to run.
+proc ::mUtilMenu::RunSchematicCheckOnSelection { {pModes {grid}} } {
+    variable mChkBatchDetail
 
     # A missing command or an inactive PM both land here as an error rather than
     # an empty list, and "could not ask" is not the same answer as "nothing is
@@ -5158,57 +8875,118 @@ proc ::mUtilMenu::DoSchematicCheck { pVia } {
     catch { set lItemName [GetPMItemName] }
     catch { set lItemType [GetPMItemType] }
 
-    # Always dumped, whatever the answer turns out to be: this block is the raw
-    # material for working out what GetPMItemType returns.
-    ::mUtilMenu::Out "================================================================"
-    ::mUtilMenu::Out "Schematic Check - Project Manager selection"
-    ::mUtilMenu::Out "================================================================"
-    ::mUtilMenu::Out [format "  %-22s %s" "GetSelectedPMItems" \
+    # This block is the raw material for working out what the PM commands return,
+    # so it is BUILT always - but held rather than printed, because the scope it
+    # belongs to is not known yet and a wide scope prints nothing.  Flushed below
+    # for a single page, for mChkBatchDetail, and on every way out that failed:
+    # the failures are exactly when somebody needs to see it.
+    set lDiag [list]
+    lappend lDiag "================================================================"
+    lappend lDiag [::mUtilMenu::Banner "Schematic Check - Project Manager selection"]
+    lappend lDiag "================================================================"
+    lappend lDiag [format "  %-22s %s" "GetSelectedPMItems" \
               [expr { $lAsked ? $lItems : "ERROR / not available" }]]
-    ::mUtilMenu::Out [format "  %-22s %s" "GetPMItemName"      [::mUtilMenu::OrDash $lItemName]]
-    ::mUtilMenu::Out [format "  %-22s %s" "GetPMItemType"      [::mUtilMenu::OrDash $lItemType]]
-    ::mUtilMenu::Out [format "  %-22s %s" "GetActiveOpjName"   [::mUtilMenu::OrDash $lOpj]]
-    ::mUtilMenu::Out [format "  %-22s %s" "active design file" [::mUtilMenu::OrDash $lDsn]]
-    ::mUtilMenu::Out [format "  %-22s %s" "active design root" [::mUtilMenu::OrDash $lDsnRoot]]
+    lappend lDiag [format "  %-22s %s" "GetPMItemName"      [::mUtilMenu::OrDash $lItemName]]
+    lappend lDiag [format "  %-22s %s" "GetPMItemType"      [::mUtilMenu::OrDash $lItemType]]
+    lappend lDiag [format "  %-22s %s" "GetActiveOpjName"   [::mUtilMenu::OrDash $lOpj]]
+    lappend lDiag [format "  %-22s %s" "active design file" [::mUtilMenu::OrDash $lDsn]]
+    lappend lDiag [format "  %-22s %s" "active design root" [::mUtilMenu::OrDash $lDsnRoot]]
 
     set lHits [list]
     foreach lLabel $lItems {
         set lCls  [::mUtilMenu::ClassifyPMItem $lLabel $lDsn $lDsnRoot $lOpj]
         set lKind [lindex $lCls 0]
-        ::mUtilMenu::Out [format "    %-34s -> %s" $lLabel $lKind]
+        lappend lDiag [format "    %-34s -> %s" $lLabel $lKind]
         if { $lKind ne "other" } {
             lappend lHits [list $lKind $lLabel [lindex $lCls 1]]
         }
     }
 
     if { [llength $lHits] == 0 } {
+        ::mUtilMenu::OutLines $lDiag
         if { !$lAsked } {
             set lMsg "Could not read the Project Manager selection.\n\nIs a project open, and is PROJECT_MANAGER_VIEW the active window?"
         } elseif { [llength $lItems] == 0 } {
-            set lMsg "Nothing is selected in the Project Manager.\n\nClick a Design (.DSN) or the Project (.OPJ) and try again."
+            set lMsg "Nothing is selected in the Project Manager.\n\nClick a page, a schematic, the Design (.DSN) or the Project (.OPJ) and try again."
         } else {
-            set lMsg "The Project Manager selection is not a Design or a Project.\n\nSelected:  [join $lItems {, }]\n\nClick a Design (.DSN) or the Project (.OPJ) and try again."
+            set lMsg "The Project Manager selection is not a page, a schematic, a Design or a Project.\n\nSelected:  [join $lItems {, }]\n\nClick a page, a schematic, the Design (.DSN) or the Project (.OPJ) and try again."
         }
-        ::mUtilMenu::Out "  -> not a Design or Project"
+        ::mUtilMenu::Out "  -> not a page, schematic, Design or Project"
         catch { capDisplayMessageBox $lMsg "Schematic Check" }
         return true
     }
 
-    set lMsg "Project Manager selection:\n"
-    foreach lHit $lHits {
-        set lKind [string totitle [lindex $lHit 0]]
-        set lPath [lindex $lHit 2]
-        if { $lPath eq "" } {
-            # Classified by its own extension, but the PM could not say where the
-            # file is - name it anyway rather than dropping the answer.
-            append lMsg "\n$lKind:  [lindex $lHit 1]\nPath:    (not available from the Project Manager)\n"
-        } else {
-            append lMsg "\n$lKind:  [file tail $lPath]\nPath:    [file nativename $lPath]\n"
+    # ONE hit decides the scope, and the narrowest one wins: clicking a page in a
+    # tree whose Design node is also selected means that page.  Ordered narrow to
+    # wide, and the whole selection is scanned for each kind in turn rather than
+    # taking the first hit in tree order.
+    set lPick ""
+    foreach lKind { page schematic design project } {
+        foreach lHit $lHits {
+            if { [lindex $lHit 0] eq $lKind } {
+                set lPick $lHit
+                break
+            }
         }
-        ::mUtilMenu::Out "  -> $lKind [lindex $lHit 1]"
+        if { $lPick ne "" } {
+            break
+        }
     }
-    catch { capDisplayMessageBox [string trimright $lMsg "\n"] "Schematic Check" }
-    return true
+
+    set lKind  [lindex $lPick 0]
+    set lLabel [lindex $lPick 1]
+    set lWhat  [lindex $lPick 2]
+
+    # What to call the scope in the report.  A handle is no use to a reader, so a
+    # design handle is resolved back to its file and a schematic to its name.
+    set lScope "[string totitle $lKind] [::mUtilMenu::OrDash $lLabel]"
+    if { [::mUtilMenu::PMItemDboClass $lLabel] ne "" } {
+        switch -- $lKind {
+            design {
+                set lPath [::mUtilMenu::DesignPathOf $lWhat]
+                if { $lPath ne "" } {
+                    set lScope "Design [file tail $lPath]"
+                }
+            }
+            schematic {
+                if { [::mUtilMenu::BindDboHandle $lWhat DboSchematic] } {
+                    set lScope "Schematic [::mUtilMenu::CStr $lWhat GetName]"
+                }
+            }
+            page {
+                if { [::mUtilMenu::BindDboHandle $lWhat DboPage] } {
+                    set lScope "Page [::mUtilMenu::CStr $lWhat GetName]"
+                }
+            }
+        }
+    } elseif { $lKind eq "design" || $lKind eq "project" } {
+        set lScope "[string totitle $lKind] [file tail $lWhat]"
+    }
+
+    # A single selected page is the only scope that talks to the Command Window.
+    # Everything wider is silent unless mChkBatchDetail says otherwise - see the
+    # variable, and RunSchematicCheck's pLoud.
+    set lLoud [expr { $lKind eq "page" || $mChkBatchDetail }]
+
+    # Everything under it, as objects.  A schematic / design / project is "every
+    # page below this one"; a page is a one-page list, so the run below is the
+    # same code either way.
+    set lPairs [::mUtilMenu::PagesForPMItem $lKind $lWhat $lDsn]
+    lappend lDiag "  -> $lScope: [llength $lPairs] page(s) to check"
+    if { $lLoud || [llength $lPairs] == 0 } {
+        ::mUtilMenu::OutLines $lDiag
+    }
+
+    if { [llength $lPairs] == 0 } {
+        set lMsg "$lScope\n\nNo pages could be read under it."
+        if { $lKind eq "project" && $lDsn eq "" } {
+            append lMsg "\n\nA .OPJ names no design of its own, so the design the\nProject Manager has open is the one that would be used -\nand it did not report one.  Click the .DSN instead."
+        }
+        catch { capDisplayMessageBox $lMsg "Schematic Check" }
+        return true
+    }
+
+    return [::mUtilMenu::RunSchematicCheck $lPairs $lScope $lLoud $pModes $lKind]
 }
 
 #=============================================================================
@@ -5317,10 +9095,15 @@ proc ::mUtilMenu::init { } {
     catch { ::mUtilMenu::LoadConfig }
     ::mUtilMenu::initXmlMenu
     ::mUtilMenu::initAccessoryMenu
+
+    # One line at load, so the Command Window says which build is in place before
+    # anything is run with it.  Through Out, so mQuiet still governs it.
+    ::mUtilMenu::Out "[::mUtilMenu::VerStr] loaded"
 }
 
 proc ::mUtilMenu::remove { } {
     ::mUtilMenu::CloseSchematicCompare
+    ::mUtilMenu::CloseSchematicCheck
     ::mUtilMenu::ClosePageSelector
     ::mUtilMenu::CloseResultWindow
     catch {
@@ -5337,9 +9120,13 @@ proc ::mUtilMenu::remove { } {
 # Diagnostics - run in the Command Window and paste the output back.
 #-----------------------------------------------------------------------------
 proc ::mUtilMenu::diag { } {
+    # diag is the one place the full identification is printed - see mAuthor.
+    ::mUtilMenu::Out [::mUtilMenu::Banner "diagnostics"]
+    ::mUtilMenu::Out "  [::mUtilMenu::About]"
     ::mUtilMenu::Out "--- commands present ---"
     foreach c { capCloseChildViewsExceptCurrent capCloseChildViews \
-                EnableAllButCurrentWindowCloseMenu AddAccessoryMenu \
+                EnableAllButCurrentWindowCloseMenu EnableAllWindowCloseMenu \
+                GetActivePM Open AddAccessoryMenu \
                 InsertXMLMenu FindXMLMenu RefreshMenu RegisterAction \
                 svsDiffDesigns capDisplayMessageBox SetAppWindowAsParent \
                 GetSelectedPMItems GetPMItemName GetPMItemType \
