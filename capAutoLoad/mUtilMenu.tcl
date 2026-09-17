@@ -3,7 +3,7 @@
 #
 #  mUtil - OrCAD Capture 17.4 schematic utilities
 #
-#  Version   1.00
+#  Version   1.01
 #  Author    LEO
 #  Company   ASROCK
 #
@@ -14,7 +14,7 @@
 #  The three fields above are also namespace variables - mVersion, mAuthor,
 #  mCompany - so they can be read at run time:
 #
-#      puts [::mUtilMenu::About]        ->  mUtil 1.00 - LEO, ASROCK
+#      puts [::mUtilMenu::About]        ->  mUtil 1.01 - LEO, ASROCK
 #
 #  mVersion is the only one of the three that anything prints on its own: it goes
 #  on the banner line of every report (see VerStr and Banner).  The author and
@@ -85,8 +85,13 @@
 #                   the canvas draws the result between them:
 #                     exact    same name after StripPageNamePrefix - black text,
 #                              solid line from one column to the other
-#                     similar  same first mPageSimilarChars characters - red text,
-#                              dashed line
+#                     similar  red text, dashed line.  Any ONE of: the two names
+#                              are identical once every
+#                              mPageNameRedundantChars character is taken out of
+#                              them ("096. BMC AST2600" = "096 - BMC  AST2600");
+#                              or their first mPageSimilarChars (10) characters
+#                              agree; or the first mPageCompactSimilarChars (7)
+#                              characters of those compacted names agree.
 #                     none     no counterpart at all - red text, no line
 #                   The lines are all drawn in one go once the window is finished
 #                   (mPageLinksReady / RedrawPageLinks), not while it is being
@@ -113,9 +118,11 @@
 #                       +VCC1.8V     1  HC32.2 HC408.1
 #
 #                   and the two netlists are then COMPARED - that comparison is
-#                   what the pink lines over (N)'s net wires come from, under four
-#                   rules, tried in this order (NetlistCompare; grep the file for
-#                   net_compare_rule to change one of them):
+#                   what the pink lines over (N)'s net wires come from, under the
+#                   first four rules below, tried in this order (NetlistCompare;
+#                   grep the file for net_compare_rule to change one of them).
+#                   Rule 5 is the odd one out: it walks the PARTS, not the
+#                   netlists, and it draws a stub rather than covering a wire.
 #
 #                     net_compare_rule1  a net of (N) with no Part_Reference.Pin
 #                                        on it at all and the global/local bit 0
@@ -126,20 +133,60 @@
 #                     net_compare_rule3  both have it, global/local bit differs -
 #                                        a different net.  Marks every wire of it.
 #                     net_compare_rule4  both have it with the same bit, but the
-#                                        pins on it differ.  Marks only the wire
-#                                        at each changed pin, and only when the
-#                                        PART behind that pin has more than
-#                                        mRule4MinPins (5) pins: the pin's own
-#                                        connection point is located, and the wire
-#                                        of that net which touches it is the one
-#                                        drawn over.  A changed pin on a part with
-#                                        5 pins or fewer - a resistor, a capacitor,
-#                                        a small header - is not processed at all:
-#                                        it is listed as skipped in the Command
-#                                        Window and never drawn or reported.
-#                                        A pin only (O) had is reported and not
-#                                        marked - (N) has no position for it - and
-#                                        is held to the same pin count.
+#                                        PHYSICAL ENDPOINTS on it differ.  An
+#                                        endpoint is a part pin ("U1D.E43") or an
+#                                        Off-Page / Power / Port symbol
+#                                        ("OFFPAGE:DDI2_TXP3"), compared by that
+#                                        IDENTITY and never by where it sits - the
+#                                        same pin wired at a new coordinate is the
+#                                        same connection, and a swapped off-page
+#                                        connector is a change even though the
+#                                        global/local bit rule3 tests stays 1.
+#                                        Marks every wire of (N)'s net whose own
+#                                        two END coordinates include an endpoint
+#                                        (N) has and (O) has not.  A wire with no
+#                                        endpoint at either end, or with endpoints
+#                                        both designs share, is left alone.
+#                                        mRule4MarkMinPins (1) filters PART PINS
+#                                        only: a changed pin on a part of that many
+#                                        pins or fewer is listed as skipped in the
+#                                        Command Window and never drawn or
+#                                        reported.  A symbol has no pin count and
+#                                        is never filtered.  At 1 the filter is all
+#                                        but off - it used to be the same number as
+#                                        mRule4MinPins (5), and hiding two-pin
+#                                        passives hid real re-wiring; the two were
+#                                        split so the cost knob could stay up while
+#                                        the filter came down.  See the variables.
+#                                        An endpoint only (O) had is reported and
+#                                        not marked - (N) has no position for it -
+#                                        and is held to the same pin count.
+#                     net_compare_rule5  a pin that came loose.  For every part
+#                                        BOTH designs have (matched on Part
+#                                        Reference), every pin the two share is
+#                                        asked whether it is unconnected on (N)
+#                                        while it was on a net on (O).  If it is,
+#                                        (N) gets a pink stub at that pin: one end
+#                                        exactly on the pin's connection point,
+#                                        the other mRule5StubLen (0.4in = four
+#                                        0.1in grid steps) out through the nearest
+#                                        edge of the part's bounding box, so it
+#                                        points away from the part body and never
+#                                        back through it.  Ties and anything that
+#                                        cannot be worked out go right.
+#                                        Rules 1-4 cannot see this: a net that
+#                                        lost its last pin is not in (N)'s netlist
+#                                        at all, so there is no (N)-side record to
+#                                        walk and no wire left to draw over - but
+#                                        the PIN is still there, which is what
+#                                        rule5 points at.  No pin-count filter:
+#                                        a two-pin part that came unwired is a
+#                                        finding.  mRule5 0 turns it off.
+#                                        It is the one thing that makes (N)'s dump
+#                                        read differently from (O)'s: (N) is
+#                                        dumped with mPinPosAll raised so its
+#                                        unconnected pins report a position, which
+#                                        is where the stub goes.
 #
 #                   The Nets section is still dumped and still diffed New/Remove
 #                   for the report, but it no longer draws anything: it compares
@@ -157,7 +204,10 @@
 #                   Every marker line is broken rather than solid so it can never
 #                   be read as a wire the compare added - see mMarkLineStyle for
 #                   the five styles available - and nudged clear of the wire it
-#                   marks by mLineOffset.
+#                   marks by mLineOffset.  Rule5's stubs are the exception to the
+#                   nudge: they are drawn exactly where they were worked out,
+#                   because a stub says "this pin" and a nudged one would say the
+#                   pin next door.
 #                   DrawCompareMarkerLine / DrawPageLineOn / DrawPageBoxOn are the
 #                   only part of this file that *writes* to a design.
 #     Refcompare    the connection compare.  Two sections, no marker lines -
@@ -192,10 +242,22 @@
 #                   of a symbol row, so a net rename does not turn into a
 #                   "Changed" part there.
 #     AllPagesComp  the same compare PageComp does - same page walk, same
-#                   DumpFullCompare, same net_compare_rule1..4 markers - but over
+#                   DumpFullCompare, same net_compare_rule1..5 markers - but over
 #                   every mapped page pair at once: every pair the selector drew a
 #                   line for, solid or dashed.  A page with no line is not
 #                   compared and not touched.
+#                   BOTH WAYS by default - the "(N)(O)BOTH COMP" box on the
+#                   selector's legend row, ::BOTH_N_O_COMP.  Ticked, each pair is
+#                   compared once with (O) as the baseline and (N) marked, and
+#                   again with the two swapped so (O) is the one that gets the
+#                   pink lines and the turquoise rectangles.  That second pass is
+#                   not a repeat: only the NEW side of a diff is ever drawn, so a
+#                   part, a net or a wired pin that only (O) has draws nothing in
+#                   the forward pass and is exactly what the backward one finds.
+#                   ONLY (N) IS EVER RENAMED - the backward pass draws on (O) and
+#                   leaves its page names alone, '*' and all.  Untick the box for
+#                   the forward pass on its own, which is what the button did
+#                   before the box existed.
 #                   No page dump and no timing: both would be paid once per pair,
 #                   which is thousands of Command Window lines and a measuring
 #                   overhead for an answer that is a count (ComparePagePair turns
@@ -204,15 +266,22 @@
 #                   finishes, so a long run shows where it is:
 #
 #                     AllPagesComp - (N) new.dsn   (O) old.dsn
+#                       (N)(O)BOTH COMP is on - every pair is compared both ways; only (N) is renamed
 #                       (N) PAGE1   (O) PAGE1   Page comparison finished - no difference
+#                       (O) PAGE1   (N) PAGE1   Page comparison finished - no difference
 #                       (N) PAGE2   (O) PAGE2   Page comparison finished - 7 marker(s), '*' added
+#                       (O) PAGE2   (N) PAGE2   Page comparison finished - 2 marker(s), page name left alone
 #
 #                   Page names only - the schematic name is the same on every line
-#                   of a run, so it is said once in the header and left off.
+#                   of a run, so it is said once in the header and left off.  The
+#                   MARKED page leads its line, which is what the "(N)"/"(O)" at
+#                   the front says: it is the page to open next.
 #
 #                   Each (N) page that came out different keeps its markers AND
 #                   gets a '*' put in front of its name, so PROJECT_MANAGER_VIEW
-#                   shows which pages changed.  Ends in one message box with the
+#                   shows which pages changed.  An (O) page the backward pass drew
+#                   on keeps its markers and its name - it has to be saved too, and
+#                   the message box says so.  Ends in one message box with the
 #                   count; OK
 #                   closes it and the page selector with it, and then puts the
 #                   Project Manager's selection back on the (N) design - the
@@ -289,7 +358,7 @@ namespace eval ::mUtilMenu {
     # returns them, diag prints them - and deliberately nowhere else: a dump is
     # for reading schematic data, not for reading a byline, and the column
     # alignment in those dumps is worked out to the character.
-    variable mVersion "1.00"
+    variable mVersion "1.01"
     variable mAuthor  "LEO"
     variable mCompany "ASROCK"
 
@@ -393,6 +462,19 @@ namespace eval ::mUtilMenu {
     # similar to a name of the same length, which would have matched exactly.
     variable mPageSimilarChars 10
 
+    # The same threshold for the COMPACTED name - the name with every
+    # mPageNameRedundantChars character taken out of it, wherever it sat.  Lower
+    # than mPageSimilarChars on purpose: compacting has already thrown away the
+    # separators, so seven characters of a compacted name carry more of the name
+    # than ten characters of a name still padded with dots and spaces.
+    #
+    #   "*096. BMC AST2600 UART"  ->  "096BMCAST2600UART"
+    #    ^^^^^^^^^^ 10 raw chars       ^^^^^^^ 7 compacted chars
+    #
+    # Set it to 0 to turn the compacted-head pass off and keep only the
+    # compacted-exact pass.
+    variable mPageCompactSimilarChars 7
+
     # Colours of the two link styles.  Tk colour names, not DboValue enums - these
     # are drawn in the dialog, not on a page.
     variable mLinkColorExact   "#2e8b57"
@@ -435,6 +517,27 @@ namespace eval ::mUtilMenu {
     # stripped off the front before the two names are compared.  Whitespace is in
     # the set too, otherwise "* PAGE1" would keep a leading space and never match.
     variable mPageNamePrefixChars "*-?~+%\$#@! \t"
+
+    # Punctuation and whitespace that says nothing about WHICH page a page is, so
+    # the "similar" passes are allowed to take it out of the middle of a name as
+    # well as off the front:
+    #
+    #   "*096. BMC AST2600 UART,SPI,MAC"  ->  "096BMCAST2600UART,SPI,MAC"
+    #
+    # That makes two pages the same page across a renumbering that only moved the
+    # separators about ("096.BMC AST2600" vs "096 - BMC  AST2600").  It is a
+    # SUPERSET of mPageNamePrefixChars - the same characters plus "." - so
+    # compacting a name that has already been through StripPageNamePrefix gives
+    # the same answer as compacting the raw name, which is why PageKeyCompact can
+    # take the stripped key and not the page name.
+    #
+    # The comma is deliberately NOT in here: "UART,SPI,MAC" is a list of what is
+    # on the page, and dropping the separators out of it would run three distinct
+    # names together.
+    #
+    # Only the similar passes use this.  "exact" still means exact after nothing
+    # but the leading markers came off - see Page_name_mapping.
+    variable mPageNameRedundantChars "*.-?~+%\$#@! \t"
 
     # Serial number for the SWIG iterator command names built in NextIterName.
     variable mIterSeq 0
@@ -480,8 +583,17 @@ namespace eval ::mUtilMenu {
     #                 buses  one per bus wire (N) has and (O) has not
     #   mMarkBoxes  one rectangle per part (N) has and (O) has not, around its
     #               bounding box, {label left top right bottom}
-    variable mMarkSegs  [list]
-    variable mMarkBoxes [list]
+    #   mMarkPinSegs  net_compare_rule5's stubs, {label x y direction} - the pin's
+    #               own connection point and which way to grow the line out of it.
+    #               A THIRD list and not more mMarkSegs entries, for two reasons:
+    #               the length is a setting in user units and only the page knows
+    #               its granularity, so the far end cannot be worked out until
+    #               draw time; and mMarkSegs is nudged clear of the wire it marks
+    #               by OffsetSeg, which would pull a stub off the very pin it is
+    #               pointing at.  See PartPinConnCompare and DrawMarkersOnPage.
+    variable mMarkSegs    [list]
+    variable mMarkBoxes   [list]
+    variable mMarkPinSegs [list]
 
     # How far the marker is moved off the wire it marks, so it does not simply
     # cover it: a horizontal wire's marker goes up by this much, a vertical wire's
@@ -499,21 +611,94 @@ namespace eval ::mUtilMenu {
     # and everything Refcompare reports).  Nets and Buses are listed in full.
     variable mRefListMax 200
 
-    # net_compare_rule4 only: how many pins the PART behind a changed pin has to
-    # have before that pin is worth a line on the page.  A part with this many pins
-    # or FEWER is left alone - the rule fires on the net, the pin is listed in the
-    # Command Window as skipped, and nothing is drawn.
+    # TWO pin-count thresholds, because the one variable was doing two jobs that
+    # want different answers.  Both are "a part with this many pins or FEWER",
+    # counted as the placed instance's OWN pins (element 10 of a part row), so one
+    # section of a multi-part package counts its own section's pins.
     #
-    # 5 by default, so the parts that keep being re-wired without anything really
-    # changing - resistors, capacitors, diodes, single gates, small headers - do not
-    # each cost a pink line, while an IC losing or gaining a connection does.  The
-    # count is the placed instance's OWN pins (element 10 of a part row), so one
-    # section of a multi-part package counts its own section's pins, not the
-    # package's.
+    #   mRule4MinPins       how big a part has to be before the parts walk spends
+    #                       three Dbo calls reading each of its pins' positions.
+    #                       A COST knob, nothing else - see CollectPageParts.
+    #   mRule4MarkMinPins   how big a part has to be before net_compare_rule4 will
+    #                       draw a line at a changed pin on it.  The FILTER the
+    #                       rule actually applies - see NetlistCompare.
     #
-    # 0 turns the filter off - every changed pin gets marked, which is what rule4
-    # did before the filter existed.
-    variable mRule4MinPins 5
+    # WHY THEY DIFFER.  The filter wants to be off: at 5 it swallowed a whole M.2
+    # page's worth of real re-wiring on W980_WS, where the TX pairs had been
+    # re-ordered between revisions by swapping which AC-coupling capacitor sat on
+    # which net -
+    #
+    #     PCD_PCIE_A_TX_4_DN   M2SC80.2 only on (N) - part has 2 pins ... skipped
+    #     PCD_PCIE_A_TX_4_DN   M2SC85.2 only on (O) - part has 2 pins ... skipped
+    #
+    # - eight nets and sixteen endpoints, every one a genuine connectivity change
+    # and not one of them drawn.  The filter cannot tell "this resistor moved to
+    # another net" from "a different capacitor is on this net now"; it only counts
+    # pins, and missing a real change is the worse of the two failures.
+    #
+    # The cost knob wants to stay up: dropping it to 1 as well means reading a
+    # position for very nearly every pin of every part, which on a 3000-pin page
+    # is most of a second per side and, over AllPagesComp's 149 page pairs in both
+    # directions, minutes.
+    #
+    # They can differ because rule4 only ever needs positions on the (N) side, and
+    # (N) is already dumped with mPinPosAll raised - see NeedAllPinPos, which is
+    # what keeps the two consistent no matter how they are set.
+    #
+    # Off-Page / Power / Port endpoints carry no pin count and are never filtered
+    # by either, whatever they are set to.
+    variable mRule4MinPins     5
+    variable mRule4MarkMinPins 1
+
+    # net_compare_rule5 - a pin that LOST its connection.
+    #
+    # For every part both designs have, matched on Part Reference, every pin the
+    # two have in common is asked one question: is it unconnected on (N) while it
+    # was on a net on (O)?  If it is, a pink stub is drawn at that pin on (N) -
+    # one end ON the pin's own connection point, the other mRule5StubLen away,
+    # pointing out of the part.  Nothing is drawn the other way round: a pin that
+    # GAINED a net is already a rule2/rule3/rule4 finding on the net itself.
+    #
+    # Why a rule of its own rather than more rule4.  Rule4 compares two netlists,
+    # and a net that lost its last pin is not in (N)'s netlist at all - there is
+    # no (N)-side record left for rule4 to walk.  It sees the net vanish, not the
+    # pin come loose, and a vanished net has nothing on (N) to draw on.  Rule5
+    # walks the PARTS, which are still there on both sides, so the pin is still
+    # there to point at.
+    #
+    # 0 turns it off, and with it the extra pin-position read on (N) - see
+    # mPinPosAll and RunPageCompare.  That read is what rule5 costs: three Dbo
+    # calls for every pin of every part on (N)'s page, where the compare
+    # otherwise pays them only for pins that are on a net.
+    variable mRule5 1
+
+    # How long rule5's stub is, and in what.  4 SNAP GRID STEPS by default - the
+    # "4個Grid" the rule was specified in - which is long enough to find by eye at
+    # a whole-page zoom and short enough not to reach the next part along.
+    #
+    # mRule5StubLenUnits is GridTolDoc's three modes, not MarkOffsetDoc's two, and
+    # the difference is the whole point:
+    #
+    #   grid  (DEFAULT) mRule5StubLen x mGridStepInch x GetDocUnitsPerInch.
+    #   user  x GetPhysicalGranularity - the page's OWN unit.
+    #   doc   raw integers.
+    #
+    # WHY NOT "user", WHICH IS WHAT THIS STARTED AS.  GetPhysicalGranularity is
+    # doc units per USER unit, and on a metric page the user unit is the
+    # millimetre.  W980_WS is such a page, and "0.4 user" there asked for 0.4 MM:
+    #
+    #   pin U1D.E43 at (128.02,19.30) mm = (504,76) doc
+    #   0.4 x 3.937 doc/mm = 1.57 -> 2 doc units, a stub 0.5 mm long
+    #
+    # against the 40 doc units - 4 x 0.1in, 10.16 mm - the rule asks for.  A
+    # twentieth of the intended length, on a page whose pin pitch is 10 doc units,
+    # which is why the markers were there and invisible.  Grid steps are the only
+    # unit that means the same thing on both kinds of page: Capture's schematic
+    # grid is 0.1 in and the standard libraries are built on it whatever the page
+    # displays in, so 4 steps is 4 steps either way.  Inch pages are unaffected -
+    # 4 steps there is the same 0.4 in it always was.
+    variable mRule5StubLen      4
+    variable mRule5StubLenUnits "grid"
 
     # 1 = the Nets dump prints the schematic-wide net name in brackets after the
     #     page label whenever the two differ:
@@ -840,6 +1025,37 @@ namespace eval ::mUtilMenu {
     set ::SCH_CHECK_ITEM1 1
     set ::SCH_CHECK_ITEM2 1
 
+    # AllPagesComp's "(N)(O)BOTH COMP" box, in the page selector's legend row.
+    #
+    #   1 (default)  every mapped page pair is compared TWICE - once the way it
+    #                always was, (O) as the baseline and the findings marked on
+    #                (N), and then once with the two swapped, (N) as the baseline
+    #                and the findings marked on (O).  Same rules both ways round,
+    #                same pink lines, same turquoise rectangles, net_compare_rule5
+    #                included.
+    #   0            the forward pass only - exactly what AllPagesComp did before
+    #                the box existed.
+    #
+    # ONLY (N) IS EVER RENAMED.  The '*' in front of a page name means "this page
+    # came out different in the compare", and (N) is the side the run is about;
+    # putting one on (O) as well would rewrite the reference design the user is
+    # comparing AGAINST, and the next run would then have to strip its own marks
+    # back off both sides to pair the pages up.  The backward pass draws and says
+    # what it found, and leaves (O)'s page names alone.
+    #
+    # WHY BOTH DIRECTIONS ARE NOT THE SAME COMPARE.  The section diff is a
+    # multiset difference and it is symmetric - forward New is backward Remove -
+    # but only the NEW half is ever drawn, because a Remove is something the
+    # marked page does not have and there is nowhere on it to put a marker.  So a
+    # part that only (O) has gets a rectangle on (O) in the backward pass and
+    # nothing at all in the forward one.  Same for net_compare_rule2 and rule5,
+    # which are one-directional by construction.
+    #
+    # A bare global for the same reason SCH_CHECK_ITEM1/2 are: it is meant to be
+    # read and set from the Command Window with no namespace to spell, and the
+    # checkbutton is bound straight to it so ticking the box IS the assignment.
+    set ::BOTH_N_O_COMP 1
+
     # What mUtil > Close Page closes.  See DoClosePage and the two procs above it
     # for the commands behind each one.
     #
@@ -1028,7 +1244,7 @@ proc ::mUtilMenu::OutLines { pLines } {
     }
 }
 
-# "mUtil 1.00" - what goes on a banner line.
+# "mUtil 1.01" - what goes on a banner line.
 #
 # One place, so bumping mVersion moves every banner at once and none of them can
 # be left saying an old number.
@@ -1040,7 +1256,7 @@ proc ::mUtilMenu::VerStr { } {
 # The full identification, on request only.  Nothing in normal operation calls
 # this - it is for the Command Window:
 #
-#   puts [::mUtilMenu::About]     ->  mUtil 1.00 - LEO, ASROCK
+#   puts [::mUtilMenu::About]     ->  mUtil 1.01 - LEO, ASROCK
 proc ::mUtilMenu::About { } {
     variable mAuthor
     variable mCompany
@@ -1050,7 +1266,7 @@ proc ::mUtilMenu::About { } {
 # A report's first line: what produced it, which build, and what it is about.
 #
 #   ================================================================
-#   mUtil 1.00  Schematic Check - Design W980_WS.DSN
+#   mUtil 1.01  Schematic Check - Design W980_WS.DSN
 #   ================================================================
 #
 # The version sits at the FRONT of the banner and nowhere else.  Putting it on
@@ -1254,9 +1470,25 @@ proc ::mUtilMenu::RememberInitDir { pDir } {
 #=============================================================================
 
 # Pick the folder that the two Design File Browse... buttons start in.
+#
+# MOVING THE FOLDER EMPTIES THE TWO DESIGN FIELDS.  A path under the old folder is
+# not a sensible starting point for work in a new one - it is nearly always the
+# previous comparison left over - and leaving it there is how the wrong pair gets
+# compared: the user changes folder, fills in one field, and Executes against a
+# design from the job before.  Clearing both says plainly that the pair has to be
+# chosen again.
+#
+# Only when the folder ACTUALLY MOVES.  Cancelling the directory dialog changes
+# nothing, and neither does picking the folder that was already set - both leave
+# the fields alone.  RememberInitDir is what decides that (it normalises the path
+# and returns early when it matches), so the test here is what mCmpInitDir held
+# before against what it holds after, rather than a string compare of its own that
+# could disagree with it over a trailing slash.
 proc ::mUtilMenu::BrowseInitDir { } {
     variable mCmpWin
     variable mCmpInitDir
+    variable mCmpFileA
+    variable mCmpFileB
 
     set lOpts [list -parent $mCmpWin -title "Select Default Folder" -mustexist 1]
     if { [file isdirectory $mCmpInitDir] } {
@@ -1264,46 +1496,57 @@ proc ::mUtilMenu::BrowseInitDir { } {
     }
 
     set lDir [eval tk_chooseDirectory $lOpts]
-    if { $lDir ne "" } {
-        ::mUtilMenu::RememberInitDir $lDir
+    if { $lDir eq "" } {
+        return 0
     }
+
+    set lOld $mCmpInitDir
+    ::mUtilMenu::RememberInitDir $lDir
+    if { $mCmpInitDir eq $lOld } {
+        return 0
+    }
+
+    set mCmpFileA ""
+    set mCmpFileB ""
+    ::mUtilMenu::Trace "Default Folder moved to $mCmpInitDir - both design fields cleared"
+    return 1
 }
 
 # Browse for one .DSN and drop it into the given namespace variable.
+#
+# ALWAYS STARTS AT mCmpInitDir - the Default Folder on the dialog's first row,
+# whatever BrowseInitDir last put there.  One anchor, set in one place, and the
+# user navigates away from it inside the file dialog if the design is somewhere
+# else.
+#
+# It used to start at the folder of whatever was already in the field and fall
+# back to mCmpInitDir, and picking a design used to move the Default Folder to
+# wherever that design came from.  Both are gone, and they went together: a Browse
+# that silently rewrote the anchor meant choosing (O) in one folder moved where
+# (N) would start looking, and once the anchor is the user's to set there is no
+# reason to second-guess it from a field's contents either.  The Default Folder is
+# set in one place, on its own row, with its own button.
+#
+# Which is also why this does NOT clear anything.  Filling in one design field is
+# not a statement about the other; moving the Default Folder is, and that is where
+# the clearing lives - see BrowseInitDir.
 proc ::mUtilMenu::BrowseDesign { pVarName } {
     variable mCmpWin
     variable mCmpInitDir
-
-    # Prefer the folder of whatever is already in the field, so a second Browse
-    # reopens where the user was.  Otherwise start at mCmpInitDir.
-    set lDir ""
-    set lCur [set ::mUtilMenu::$pVarName]
-    if { $lCur ne "" && [file isdirectory [file dirname $lCur]] } {
-        set lDir [file dirname $lCur]
-    } elseif { [file isdirectory $mCmpInitDir] } {
-        set lDir $mCmpInitDir
-    }
 
     set lOpts [list \
         -parent $mCmpWin \
         -title "Select Design File" \
         -defaultextension ".dsn" \
         -filetypes { {"OrCAD Design Files" {.dsn}} {"All Files" *} }]
-    if { $lDir ne "" } {
-        lappend lOpts -initialdir $lDir
+    if { [file isdirectory $mCmpInitDir] } {
+        lappend lOpts -initialdir $mCmpInitDir
     }
 
     set lFile [eval tk_getOpenFile $lOpts]
 
     if { $lFile ne "" } {
         set ::mUtilMenu::$pVarName [file nativename $lFile]
-        # The folder the .DSN came out of becomes the new default - that is the
-        # answer to "can it remember where I browsed to": picking a design in
-        # another folder moves the Default Folder there, and it is written out, so
-        # the next Browse and the next session start there.  The Default Folder
-        # field on the dialog updates with it, since it is bound to the same
-        # variable.
-        ::mUtilMenu::RememberInitDir [file dirname $lFile]
     }
 }
 
@@ -1384,7 +1627,7 @@ proc ::mUtilMenu::GetDesignPages { pDsnPath } {
 
     if { $lDesign == $lNullObj } {
         catch { $lStatus -delete }
-        error "design not found in session"
+        error "design not found in session: [file tail $pDsnPath]"
     }
 
     set lSchIter [$lDesign NewViewsIter $lStatus $::IterDefs_SCHEMATICS]
@@ -2297,6 +2540,26 @@ proc ::mUtilMenu::PinPosStr { pPage pPin } {
     return "([::mUtilMenu::Coord $pPage [lindex $lPos 0]],[::mUtilMenu::Coord $pPage [lindex $lPos 1]])"
 }
 
+# What a netlist calls one pin - the "A35" half of "U1.A35".
+#
+# The physical pin NUMBER, because that is what a netlist is keyed on, falling
+# back to the pin NAME for a part that has no numbers so the entry still says
+# which pin it was rather than ending in a bare dot.  OrDash keeps a pin with
+# neither from collapsing to the empty string, which would make every such pin
+# on a part look like the same pin.
+#
+# One proc and not the same three lines in each caller: CollectNetlist builds
+# "$lRef.$lNum" out of it and net_compare_rule5 matches (O) pins against (N)
+# pins with it, and if the two ever disagreed about what a pin is called then
+# rule5 would silently stop finding the pins rule4 reports.
+proc ::mUtilMenu::PinKey { pPin } {
+    set lNum [lindex $pPin 1]
+    if { $lNum eq "" } {
+        set lNum [::mUtilMenu::OrDash [lindex $pPin 0]]
+    }
+    return $lNum
+}
+
 # What one off-page connector / power symbol / port is joined to - the same
 # question CollectPinInfo asks of a pin, but these are not pins and the route is
 # not the same one:
@@ -2914,7 +3177,26 @@ proc ::mUtilMenu::GlobalNetIndex { pArrName pSymRows } {
     }
 }
 
-# One page's netlist, as records of {netName global pins pinDetail}.
+# One page's netlist, as records of {netName global pins pinDetail symDetail}.
+#
+# Element 4 is the Off-Page / Power / Port symbols sitting on the net, each with
+# the doc-unit point a wire has to land on:
+#
+#     {{OFFPAGE:DDI2_TXP3 1200 800} {GLOBAL:GND 2400 900} ...}
+#      type:name          x    y
+#
+# A symbol is on the net when its NAME or its CONNECTION is the net's name, which
+# is the same test GlobalNetIndex makes for element 1 - so the bit that says "this
+# net leaves the page" and the list that says "by which symbol" can never
+# disagree about what is on it.  The identity is type AND name, because an
+# off-page connector called GND and a power symbol called GND are two different
+# things to connect to.
+#
+# ON THE END, and not folded into element 2, on purpose.  Element 2 is
+# "Part_Reference.Pin" and nothing else - net_compare_rule1 fires on it being
+# EMPTY, DumpNetlists prints it, and both would change meaning if symbols joined
+# it.  net_compare_rule4 is the only reader; it wants every physical thing the net
+# is attached to, which is elements 3 and 4 together.
 #
 # Element 3 is the same pins again, each with the doc-unit position of its
 # connection point and the number of pins the part it belongs to has:
@@ -2948,6 +3230,9 @@ proc ::mUtilMenu::CollectNetlist { pDict } {
     array set lGlobal {}
     ::mUtilMenu::GlobalNetIndex lGlobal [dict get $pDict symbols]
 
+    array set lSym {}
+    ::mUtilMenu::SymEndpointIndex lSym [dict get $pDict symbols]
+
     array set lPins {}
     array set lPos  {}
     foreach lRow [dict get $pDict nets] {
@@ -2971,12 +3256,9 @@ proc ::mUtilMenu::CollectNetlist { pDict } {
                 continue
             }
             # A netlist names a pin by its number; parts that have no pin numbers
-            # fall back to the pin name, so the entry still says which pin it was
-            # rather than ending in a bare dot.
-            set lNum [lindex $lPin 1]
-            if { $lNum eq "" } {
-                set lNum [::mUtilMenu::OrDash [lindex $lPin 0]]
-            }
+            # fall back to the pin name - see PinKey, which net_compare_rule5
+            # matches its pins with as well.
+            set lNum [::mUtilMenu::PinKey $lPin]
             lappend lPins($lNet) "$lRef.$lNum"
             lappend lPos($lNet)  [list "$lRef.$lNum" \
                                        [lindex [lindex $lPin 4] 0] \
@@ -2995,9 +3277,47 @@ proc ::mUtilMenu::CollectNetlist { pDict } {
         if { [info exists lPos($lNet)] } {
             set lThisPos [lsort -dictionary -index 0 $lPos($lNet)]
         }
-        lappend lOut [list $lNet $lFlag [lsort -dictionary $lPins($lNet)] $lThisPos]
+        set lThisSym [list]
+        if { [info exists lSym($lNet)] } {
+            set lThisSym [lsort -dictionary -index 0 $lSym($lNet)]
+        }
+        lappend lOut [list $lNet $lFlag [lsort -dictionary $lPins($lNet)] \
+                           $lThisPos $lThisSym]
     }
     return $lOut
+}
+
+# net name -> the Off-Page / Power / Port symbols on it, as {type:name x y}.
+#
+# Same two row elements GlobalNetIndex looks at - 1 (the symbol's own name) and 3
+# (the net it reports being attached to) - so a symbol reaches the net under
+# either, and the two procs cannot disagree about what sits on a net.  A symbol
+# whose name and connection are both the net's name is filed once, not twice.
+#
+# Element 4 is the symbol's GetLocation as raw doc integers, which for all three
+# kinds IS the point a wire has to land on.  A symbol that would not give one is
+# filed with an empty position rather than dropped: it is still an endpoint that
+# can differ between the two designs, and net_compare_rule4 reports it as
+# unmarkable instead of losing it.
+proc ::mUtilMenu::SymEndpointIndex { pArrName pSymRows } {
+    upvar 1 $pArrName lArr
+
+    foreach lRow $pSymRows {
+        set lId "[lindex $lRow 0]:[lindex $lRow 1]"
+        set lPt [lindex $lRow 4]
+        set lX  [lindex $lPt 0]
+        set lY  [lindex $lPt 1]
+
+        set lSeen [list]
+        foreach lIdx { 1 3 } {
+            set lNet [lindex $lRow $lIdx]
+            if { $lNet eq "" || [lsearch -exact $lSeen $lNet] != -1 } {
+                continue
+            }
+            lappend lSeen $lNet
+            lappend lArr($lNet) [list $lId $lX $lY]
+        }
+    }
 }
 
 # Print what CollectNetlist returned.  Returns the count.
@@ -3057,28 +3377,48 @@ proc ::mUtilMenu::DumpNetlists { pRecsO pRecsN } {
 #                      net that used to leave the page and now does not (or the
 #                      other way round) is a different net.
 #                      -> a line over every wire of the net
-#   net_compare_rule4  both have the net with the same global/local bit, but the
-#                      pins on it are not the same.  Only the part that changed
-#                      is marked, and only when it is a part worth marking:
+#   net_compare_rule4  both have the net with the same global/local bit, but it is
+#                      not attached to the same PHYSICAL ENDPOINTS.
 #
-#                        pins on the part > mRule4MinPins (5)
-#                            the pin is located by its own connection point, and
-#                            the wire of that net which touches that point is the
-#                            one that gets the line
-#                        pins on the part <= mRule4MinPins
-#                            not processed at all.  The pin is listed as skipped in
-#                            the Command Window, gets no line, and does not appear
-#                            in the report - a resistor or a capacitor moved from
-#                            one net to another is noise at this level, and the
-#                            Parts diff is where it belongs.
+#                      An endpoint is either a part pin, identified as
+#                      "<Part Reference>.<Pin>" ("U1D.E43"), or an Off-Page /
+#                      Power / Port symbol, identified as "<TYPE>:<name>"
+#                      ("OFFPAGE:DDI2_TXP3").  The symbols are endpoints in their
+#                      own right and not just the global/local bit rule3 tests:
+#                      that bit only says whether the net has ANY such symbol, so
+#                      a net that swapped one off-page connector for another keeps
+#                      the bit and is a different net all the same.
 #
-#                      The count is the part's own pin count, taken from the
-#                      netlist record (CollectNetlist element 3), not worked out
-#                      from the pin's name.
-#                      A pin (O) had and (N) has not is reported and NOT marked -
-#                      there is no position on (N)'s page for it (the part or the
-#                      pin is gone), and the Parts diff is what catches it.  It is
-#                      held to the same pin count, out of (O)'s netlist, so a
+#                      COMPARED BY IDENTITY, NEVER BY POSITION.  The same pin
+#                      wired at a different coordinate is the same connection and
+#                      rule4 says nothing about it - a moved wire is the Nets
+#                      section's business.  Endpoints are diffed as a multiset, so
+#                      the same id twice is not one id.
+#
+#                      WHAT GETS DRAWN.  Every wire of (N)'s net whose own two END
+#                      coordinates include the position of an endpoint that (N)
+#                      has and (O) does not.  A wire with no endpoint at either
+#                      end, or with endpoints both designs share, is left alone -
+#                      so a net that grew one new connection gets a line on the
+#                      wire that arrives there and not over the whole net.
+#
+#                      THE mRule4MarkMinPins (1) FILTER applies to part pins only.
+#                      A changed pin on a part of that many pins or fewer is listed
+#                      as skipped in the Command Window and gets no line and no
+#                      entry in the report.  A symbol has no pin count and is never
+#                      filtered: an off-page connector coming or going is not that
+#                      kind of noise.
+#                      At 1 the filter is effectively off, and deliberately so - at
+#                      5 it swallowed a whole M.2 page's worth of real re-wiring
+#                      done by swapping AC-coupling capacitors between nets.  It is
+#                      NOT mRule4MinPins, which stays at 5 and only decides how
+#                      many pin positions the parts walk bothers to read; see both
+#                      variables, and NeedAllPinPos for what keeps them consistent.
+#                      The count is the part's own, out of the netlist record, not
+#                      worked out from the pin's name.
+#                      An endpoint (O) had and (N) has not is reported and NOT
+#                      marked - there is nothing on (N)'s page to put a line at -
+#                      and is held to the same pin count out of (O)'s side, so a
 #                      rewired 2-pin part is not skipped at one end of the change
 #                      and reported at the other.
 #
@@ -3148,104 +3488,162 @@ proc ::mUtilMenu::PinMultisetDiff { pPinsO pPinsN } {
     return $lOut
 }
 
-# "HC32.2" -> every position filed under it in one netlist record's element 3.
-# A list, not a single point: the same pin name can legitimately appear twice when
-# two instances share a Part Reference, and marking both is the safe answer.
-# A pin whose position could not be read contributes nothing, so the caller sees an
-# empty list and says so.
-proc ::mUtilMenu::PinPosIndex { pArrName pRec } {
-    upvar 1 $pArrName lArr
-
+# Every PHYSICAL ENDPOINT of one net, out of one netlist record: the part pins of
+# element 3 and the Off-Page / Power / Port symbols of element 4, in one list of
+#
+#     {id x y pinCount}
+#
+#   id         "U1D.E43" for a pin, "OFFPAGE:DDI2_TXP3" for a symbol.  This is
+#              what net_compare_rule4 compares - the thing the net is attached to,
+#              NOT where it is attached.  Two designs that wire the same pin at
+#              two different coordinates are the same connection and rule4 says
+#              nothing; the Nets section is where a moved wire shows up.
+#   x y        doc units, "" when the position could not be read
+#   pinCount   pins on the part behind it, for the mRule4MinPins filter.  EMPTY
+#              for a symbol, which is not a part and has no count to be filtered
+#              on - an off-page connector appearing or disappearing is never
+#              noise, however few pins the things around it have.
+#
+# Sorted, so the two sides are compared in the same order whatever order the
+# database handed the objects over in.
+proc ::mUtilMenu::NetEndpoints { pRec } {
+    set lOut [list]
     foreach lEntry [lindex $pRec 3] {
-        set lKey [lindex $lEntry 0]
-        set lX   [lindex $lEntry 1]
-        set lY   [lindex $lEntry 2]
-        if { $lX eq "" || $lY eq "" } {
-            continue
+        lappend lOut [list [lindex $lEntry 0] [lindex $lEntry 1] \
+                           [lindex $lEntry 2] [lindex $lEntry 3]]
+    }
+    foreach lEntry [lindex $pRec 4] {
+        lappend lOut [list [lindex $lEntry 0] [lindex $lEntry 1] \
+                           [lindex $lEntry 2] ""]
+    }
+    return [lsort -dictionary -index 0 $lOut]
+}
+
+# Does the (N) side of a compare have to be dumped with EVERY pin's position -
+# mPinPosAll - rather than only the pins the parts walk would read on its own?
+#
+# Two reasons, and either is enough:
+#
+#   rule5   marks pins that are on NO net, and those are exactly the pins the
+#           walk leaves without a position whatever the thresholds say.
+#   rule4   marks changed pins on parts of more than mRule4MarkMinPins pins, while
+#           the walk only reads positions for parts of more than mRule4MinPins.
+#           Set the filter lower than the cost knob - which is the point of having
+#           two - and the pins in between are ones rule4 wants to mark and the
+#           walk would not have located.  Without this they would come back as
+#           "no position for it, not marked", which looks like a database problem
+#           and is really just two numbers out of step.
+#
+# Asked per side and not once per run: (O) needs neither.  rule5 only reads
+# whether (O)'s pin had a net, and rule4 only reads (O)'s pin COUNT - a number the
+# part row carries whether or not any position was read - so raising it for (O)
+# would double a pin walk for a column nothing looks at.
+proc ::mUtilMenu::NeedAllPinPos { } {
+    variable mRule5
+    variable mRule4MinPins
+    variable mRule4MarkMinPins
+
+    if { $mRule5 } {
+        return 1
+    }
+    if { $mRule4MarkMinPins < $mRule4MinPins } {
+        return 1
+    }
+    return 0
+}
+
+# Is this endpoint id a part pin rather than an Off-Page / Power / Port symbol?
+#
+# Tested against the three type prefixes SymEndpointIndex builds ids with, and NOT
+# by looking for a colon: a Part Reference is free to contain one, and "is there a
+# colon in it" would then quietly exempt such a part from the mRule4MinPins
+# filter.  Anything that is not one of the three known symbol kinds is a pin,
+# which is the safe way round - a pin wrongly called a symbol would skip the
+# filter and mark a resistor.
+proc ::mUtilMenu::IsPartPinId { pId } {
+    foreach lType { OFFPAGE GLOBAL PORT } {
+        if { [string match "$lType:*" $pId] } {
+            return 0
         }
-        if { ![info exists lArr($lKey)] } {
-            set lArr($lKey) [list]
+    }
+    return 1
+}
+
+# Just the ids, for the multiset difference.
+proc ::mUtilMenu::NetEndpointIds { pRec } {
+    set lOut [list]
+    foreach lEnt [::mUtilMenu::NetEndpoints $pRec] {
+        lappend lOut [lindex $lEnt 0]
+    }
+    return $lOut
+}
+
+# id -> {positions counts}, out of NetEndpoints: every doc-unit point filed under
+# that id, and the pin counts seen with it.
+#
+# A list of points and not one point, because the same id can legitimately appear
+# twice - two placed instances sharing a Part Reference - and both are worth
+# marking.  The LARGEST count wins: the bigger part is the one worth marking, and
+# taking the smaller would silence rule4 on a real IC because a stray 2-pin part
+# happens to share its reference.
+proc ::mUtilMenu::EndpointIndex { pPosName pCntName pRec } {
+    upvar 1 $pPosName lPos
+    upvar 1 $pCntName lCnt
+
+    foreach lEnt [::mUtilMenu::NetEndpoints $pRec] {
+        set lId [lindex $lEnt 0]
+        set lX  [lindex $lEnt 1]
+        set lY  [lindex $lEnt 2]
+        set lC  [lindex $lEnt 3]
+
+        if { $lX ne "" && $lY ne "" } {
+            if { ![info exists lPos($lId)] } {
+                set lPos($lId) [list]
+            }
+            if { [lsearch -exact $lPos($lId) [list $lX $lY]] == -1 } {
+                lappend lPos($lId) [list $lX $lY]
+            }
         }
-        if { [lsearch -exact $lArr($lKey) [list $lX $lY]] == -1 } {
-            lappend lArr($lKey) [list $lX $lY]
+        if { $lC ne "" } {
+            if { ![info exists lCnt($lId)] || $lC > $lCnt($lId) } {
+                set lCnt($lId) $lC
+            }
         }
     }
 }
 
-# "HC32.2" -> how many pins the part behind it has, out of the same element 3.
-# net_compare_rule4 weighs that against mRule4MinPins.
+# Which of a net's wires have one of pPoints at an END of them.
 #
-# The LARGEST count wins when one pin name is filed twice, which only happens when
-# two placed instances carry the same Part Reference: the bigger part is the one
-# worth marking, and taking the smaller one would silence rule4 on a real IC
-# because a stray 2-pin part shares its reference.
+# pPoints is a list of {x y} doc-unit pairs - the places rule4 decided the two
+# designs differ.  A quad is returned when EITHER of its two ends is one of them;
+# a quad with neither is not returned at all, which is the rule's "a segment whose
+# two ends carry no differing endpoint is not drawn".
 #
-# A pin with no count - which should not happen, every pin comes off a part row -
-# is simply absent, and rule4 treats absent as "cannot tell, do not mark".
-proc ::mUtilMenu::PinCountIndex { pArrName pRec } {
-    upvar 1 $pArrName lArr
-
-    foreach lEntry [lindex $pRec 3] {
-        set lKey [lindex $lEntry 0]
-        set lCnt [lindex $lEntry 3]
-        if { $lCnt eq "" } {
-            continue
-        }
-        if { ![info exists lArr($lKey)] || $lCnt > $lArr($lKey) } {
-            set lArr($lKey) $lCnt
-        }
-    }
-}
-
-# Which wires of one net touch a point, comparing the raw doc-unit integers:
+# ENDS ONLY, and exact integer equality on the raw doc units.  The rule is stated
+# over the wire's two endpoint coordinates, so a point lying part-way ALONG a
+# horizontal or vertical run does not count, even though Capture allows a pin to
+# be tapped there: a wire that merely passes a differing pin on its way somewhere
+# else is not the wire that changed.  A mid-run tap therefore marks nothing and is
+# reported as unmarkable, which is honest - there is no one segment it belongs to.
 #
-#   endpoint  one of the wire's two ends IS the point.  The normal case - a wire
-#             drawn to a pin ends on that pin's connection point.
-#   on-wire   the point lies between the two ends of a horizontal or vertical
-#             wire.  A pin tapped in the middle of a run, which Capture allows;
-#             a diagonal wire is not tested, there being no exact integer test
-#             for "on the slope" worth trusting.
+# The doc integers are compared and never the printed coordinates, which are
+# rounded to mCoordDecimals and would make two distinct points look like one.
 #
-# Endpoint matches win outright: at a T junction the wire that arrives at the pin
-# is marked and the run it arrives on is not.  Returns the quads in input order,
-# or {} when no wire of the net reaches the point at all.
-proc ::mUtilMenu::SegsAtPoint { pSegs pPoint } {
-    set lX [lindex $pPoint 0]
-    set lY [lindex $pPoint 1]
-    if { $lX eq "" || $lY eq "" } {
-        return [list]
-    }
-
-    set lEnds [list]
-    set lOn   [list]
-
+# Returned in input order, at most once each, so a segment with a differing
+# endpoint at both ends is still one line.
+proc ::mUtilMenu::SegsEndingAt { pSegs pPoints } {
+    set lOut [list]
     foreach lSeg $pSegs {
-        set lX1 [lindex $lSeg 0]
-        set lY1 [lindex $lSeg 1]
-        set lX2 [lindex $lSeg 2]
-        set lY2 [lindex $lSeg 3]
-
-        if { ($lX1 == $lX && $lY1 == $lY) || ($lX2 == $lX && $lY2 == $lY) } {
-            lappend lEnds $lSeg
-            continue
-        }
-        if { $lY1 == $lY2 && $lY == $lY1 } {
-            if { ($lX > $lX1 && $lX < $lX2) || ($lX > $lX2 && $lX < $lX1) } {
-                lappend lOn $lSeg
-            }
-            continue
-        }
-        if { $lX1 == $lX2 && $lX == $lX1 } {
-            if { ($lY > $lY1 && $lY < $lY2) || ($lY > $lY2 && $lY < $lY1) } {
-                lappend lOn $lSeg
+        set lA [list [lindex $lSeg 0] [lindex $lSeg 1]]
+        set lB [list [lindex $lSeg 2] [lindex $lSeg 3]]
+        foreach lPt $pPoints {
+            if { $lPt eq $lA || $lPt eq $lB } {
+                lappend lOut $lSeg
+                break
             }
         }
     }
-
-    if { [llength $lEnds] > 0 } {
-        return $lEnds
-    }
-    return $lOn
+    return $lOut
 }
 
 # "20 pins" / "2 pins" / "no pin count", for the skipped list and the rule4 detail.
@@ -3275,7 +3673,7 @@ proc ::mUtilMenu::PinCountStr { pCount } {
 # the rules themselves are not what makes a compare slow, whatever the walk that
 # fed them costs.
 proc ::mUtilMenu::NetlistCompare { pRecsO pRecsN pNetRowsN } {
-    variable mRule4MinPins
+    variable mRule4MarkMinPins
     variable mTimeCompare
 
     set lT0 [::mUtilMenu::TimeNow]
@@ -3339,80 +3737,116 @@ proc ::mUtilMenu::NetlistCompare { pRecsO pRecsN pNetRowsN } {
         }
 
         # ---- net_compare_rule4 -------------------------------------------------
-        # Same name, same bit, different pins.  Only the wire at each changed pin
-        # is marked, not the whole net - and only when the part behind that pin has
-        # more than mRule4MinPins pins.  A changed pin on a small part (a resistor,
-        # a capacitor, a single gate, a small header) is not processed at all: it is
-        # listed as skipped in the Command Window and gets no line and no entry in
-        # the report.
-        set lAdd  [::mUtilMenu::PinMultisetDiff [lindex $lRecO 2] $lPins]
-        set lDrop [::mUtilMenu::PinMultisetDiff $lPins [lindex $lRecO 2]]
+        # Same name, same bit: are the two nets attached to the SAME PHYSICAL
+        # THINGS?
+        #
+        # The endpoints are compared by IDENTITY and never by position - a part pin
+        # is "U1D.E43", an off-page connector is "OFFPAGE:DDI2_TXP3" - so a net
+        # rewired between two parts is a difference and a net whose wires merely
+        # moved is not.  Off-page connectors, power symbols and ports count as
+        # endpoints alongside the pins: a net that stopped leaving the page by one
+        # of them is attached to something different even when every pin on it is
+        # the same, and the global/local bit rule3 tests only says whether there is
+        # ANY such symbol, not which.
+        set lIdsN [::mUtilMenu::NetEndpointIds $lRec]
+        set lIdsO [::mUtilMenu::NetEndpointIds $lRecO]
+        set lAdd  [::mUtilMenu::PinMultisetDiff $lIdsO $lIdsN]
+        set lDrop [::mUtilMenu::PinMultisetDiff $lIdsN $lIdsO]
         if { [llength $lAdd] == 0 && [llength $lDrop] == 0 } {
             continue
         }
 
-        array unset lPos
-        array set   lPos {}
-        ::mUtilMenu::PinPosIndex lPos $lRec
+        # Positions and pin counts, one index per side.  An added endpoint is on
+        # (N); a dropped one is on (O) and may not be on (N) at all.
+        array unset lPosN  ; array set lPosN  {}
+        array unset lCntN  ; array set lCntN  {}
+        array unset lPosO  ; array set lPosO  {}
+        array unset lCntO  ; array set lCntO  {}
+        ::mUtilMenu::EndpointIndex lPosN lCntN $lRec
+        ::mUtilMenu::EndpointIndex lPosO lCntO $lRecO
 
-        # Pin counts from both sides: an added pin's part is on (N), a dropped
-        # pin's part is on (O) and may not be on (N) at all.
-        array unset lCntN
-        array set   lCntN {}
-        ::mUtilMenu::PinCountIndex lCntN $lRec
-        array unset lCntO
-        array set   lCntO {}
-        ::mUtilMenu::PinCountIndex lCntO $lRecO
+        # WHICH POINTS ON (N) DIFFER.  Collected first and drawn afterwards,
+        # because the rule is stated over the SEGMENTS, not over the endpoints: a
+        # segment is drawn when one of its two ends carries a differing endpoint,
+        # and a segment with a differing endpoint at each end is still one line.
+        set lHotPts [list]
+        set lHotIds [list]
 
-        foreach lPin $lAdd {
-            set lCnt -1
-            if { [info exists lCntN($lPin)] } {
-                set lCnt $lCntN($lPin)
-            }
-            if { $lCnt <= $mRule4MinPins } {
-                lappend lSkipped \
-                    "$lNet   pin $lPin only on (N) - part has [::mUtilMenu::PinCountStr $lCnt], not more than $mRule4MinPins"
-                continue
+        foreach lId $lAdd {
+            set lCnt ""
+            if { [info exists lCntN($lId)] } {
+                set lCnt $lCntN($lId)
             }
 
-            if { ![info exists lPos($lPin)] } {
-                lappend lFound [list 4 $lNet \
-                    "pin $lPin ($lCnt-pin part) only on (N) - no position for it, not marked" [list] \
-                    "$lNet ($lPin, no position)"]
-                continue
-            }
-            foreach lPt $lPos($lPin) {
-                set lHit [::mUtilMenu::SegsAtPoint $lSegs $lPt]
-                if { [llength $lHit] == 0 } {
-                    lappend lFound [list 4 $lNet \
-                        "pin $lPin ($lCnt-pin part) only on (N), at ([lindex $lPt 0],[lindex $lPt 1]) - no wire of the net reaches it, not marked" \
-                        [list] "$lNet ($lPin, no wire there)"]
+            # The marking filter - mRule4MarkMinPins, NOT the mRule4MinPins cost
+            # knob the parts walk uses.  Part pins only: a symbol carries no pin
+            # count ("") and is never filtered, because an off-page connector
+            # coming or going is not the kind of noise the filter exists for.  A
+            # part pin whose count could not be read counts as -1 and is filtered,
+            # as it always was.
+            if { [::mUtilMenu::IsPartPinId $lId] } {
+                if { $lCnt eq "" } {
+                    set lCnt -1
+                }
+                if { $lCnt <= $mRule4MarkMinPins } {
+                    lappend lSkipped \
+                        "$lNet   $lId only on (N) - part has [::mUtilMenu::PinCountStr $lCnt], not more than $mRule4MarkMinPins"
                     continue
                 }
-                lappend lFound [list 4 $lNet \
-                    "pin $lPin ($lCnt-pin part) only on (N), at ([lindex $lPt 0],[lindex $lPt 1])" $lHit \
-                    "$lNet ($lPin)"]
             }
-        }
 
-        # Reported, never marked: the pin is on (O) and not on (N), so (N)'s page
-        # has no connection point to put a line at.  Held to the same pin count, out
-        # of (O)'s netlist - a rewired resistor should not be reported at one end and
-        # skipped at the other.
-        foreach lPin $lDrop {
-            set lCnt -1
-            if { [info exists lCntO($lPin)] } {
-                set lCnt $lCntO($lPin)
-            }
-            if { $lCnt <= $mRule4MinPins } {
-                lappend lSkipped \
-                    "$lNet   pin $lPin only on (O) - part has [::mUtilMenu::PinCountStr $lCnt], not more than $mRule4MinPins"
+            if { ![info exists lPosN($lId)] } {
+                lappend lFound [list 4 $lNet \
+                    "$lId only on (N) - no position for it, not marked" [list] \
+                    "$lNet ($lId, no position)"]
                 continue
             }
-            lappend lFound [list 4 $lNet \
-                "pin $lPin ($lCnt-pin part) only on (O) - nothing on (N) to mark" [list] \
-                "$lNet ($lPin, only (O))"]
+            foreach lPt $lPosN($lId) {
+                if { [lsearch -exact $lHotPts $lPt] == -1 } {
+                    lappend lHotPts $lPt
+                }
+            }
+            lappend lHotIds $lId
         }
+
+        # Reported, never marked: the endpoint is on (O) and not on (N), so (N)'s
+        # page has no point to put a line at.  Held to the same pin count, out of
+        # (O)'s side - a rewired resistor must not be reported at one end and
+        # skipped at the other.
+        foreach lId $lDrop {
+            if { [::mUtilMenu::IsPartPinId $lId] } {
+                set lCnt -1
+                if { [info exists lCntO($lId)] } {
+                    set lCnt $lCntO($lId)
+                }
+                if { $lCnt <= $mRule4MarkMinPins } {
+                    lappend lSkipped \
+                        "$lNet   $lId only on (O) - part has [::mUtilMenu::PinCountStr $lCnt], not more than $mRule4MarkMinPins"
+                    continue
+                }
+            }
+            lappend lFound [list 4 $lNet \
+                "$lId only on (O) - nothing on (N) to mark" [list] \
+                "$lNet ($lId, only (O))"]
+        }
+
+        if { [llength $lHotIds] == 0 } {
+            continue
+        }
+
+        # The segments themselves.  A net whose differing endpoints are all
+        # mid-run taps, or which the Nets section never listed a wire for, has
+        # nothing to draw - said once for the net rather than once per endpoint.
+        set lHit [::mUtilMenu::SegsEndingAt $lSegs $lHotPts]
+        if { [llength $lHit] == 0 } {
+            lappend lFound [list 4 $lNet \
+                "endpoints differ ([join $lHotIds {, }]) - no wire of the net ENDS at any of them, not marked" \
+                [list] "$lNet ([join $lHotIds {, }], no wire there)"]
+            continue
+        }
+        lappend lFound [list 4 $lNet \
+            "endpoints differ ([join $lHotIds {, }]) - [llength $lHit] of [llength $lSegs] wire(s) end at one of them" \
+            $lHit "$lNet ([join $lHotIds {, }])"]
     }
 
     set lGone [list]
@@ -3440,20 +3874,20 @@ proc ::mUtilMenu::NetlistCompare { pRecsO pRecsN pNetRowsN } {
 # of the returned text on purpose: a skipped pin is not a finding, so it must not
 # appear in the report window or count towards "something changed".
 proc ::mUtilMenu::PrintNetlistCompare { pFound pGone {pSkipped {}} } {
-    variable mRule4MinPins
+    variable mRule4MarkMinPins
 
     set lRuleText [list \
         1 "net with no Part_Reference.Pin on it and local (0)" \
         2 "in (N)'s netlist, not in (O)'s" \
         3 "1 = global / 0 = local differs" \
-        4 "same net, different pins - marked at the changed pin"]
+        4 "same net, different physical endpoints (pins and Off-Page / Power / Ports) - marked on the wires that end at them"]
 
     ::mUtilMenu::Out "    Netlist compare - net_compare_rule1..4; every hit gets a pink DASH line on (N)"
 
     # First, so it is read as "these were left out" rather than as part of the
     # findings below it.
     if { [llength $pSkipped] > 0 } {
-        ::mUtilMenu::Out "      net_compare_rule4 skipped - part has $mRule4MinPins pin(s) or fewer ([llength $pSkipped])"
+        ::mUtilMenu::Out "      net_compare_rule4 skipped - part has $mRule4MarkMinPins pin(s) or fewer ([llength $pSkipped])"
         foreach lLine $pSkipped {
             ::mUtilMenu::Out "        $lLine"
         }
@@ -3508,6 +3942,366 @@ proc ::mUtilMenu::PrintNetlistCompare { pFound pGone {pSkipped {}} } {
         return ""
     }
     return "Netlist (net_compare_rule1..4):\n$lMsg"
+}
+
+#-----------------------------------------------------------------------------
+# net_compare_rule5 - a pin that came loose.
+#
+# Walks the PARTS both designs have rather than the two netlists, and asks one
+# question of every pin the two sides share:
+#
+#     unconnected on (N), and on a net on (O)?
+#
+# If it is, (N)'s page gets a pink stub at that pin - one end exactly on the
+# pin's own connection point, the other mRule5StubLen out and away from the
+# part.  The stub is the marker: there is no wire left at that pin to draw over,
+# which is the whole reason the net rules cannot report this.
+#
+# NOT the other way round.  A pin that GAINED a net on (N) is already a finding:
+# the net it joined is either new (rule2) or has a pin (O) did not give it
+# (rule4), and both of those already draw on the wire that arrives at it.
+#
+# Parts are matched on Part Reference and pins on PinKey - the same key the
+# netlist names a pin with, so a rule5 line and a rule4 line about the same pin
+# call it the same thing.  A reference or a pin key that is not unique on its own
+# side is skipped and traced: with two U12s on a page there is no honest answer
+# to "which U12 is this one", and guessing would put a stub on the wrong part.
+#-----------------------------------------------------------------------------
+
+# Which way rule5's stub points: out of the part, through whichever edge of its
+# bounding box the pin is closest to.  Decided in the two steps the rule is
+# stated in - WHICH AXIS first, then WHICH SIDE of that axis:
+#
+#   1  dX = how far the pin is from the nearer of the two VERTICAL edges
+#      dY = how far the pin is from the nearer of the two HORIZONTAL edges
+#
+#   2  dX < dY   a horizontal stub.  Same Y as the pin; X + len when the right
+#                edge is the nearer one, X - len when it is the left.
+#      dY < dX   a vertical stub.  Same X as the pin; Y - len when the top edge
+#                is the nearer one, Y + len when it is the bottom.
+#      dX = dY   neither axis is nearer, so there is nothing to decide it on -
+#                the default, right.
+#
+# Page coordinates run x right and y DOWN - CRect's top is the smaller y - so
+# "up" is minus y, which is why the top edge is the one with the smaller number.
+#
+# Worked example, the one in the spec:
+#
+#   pin (12.86,3.80)   bbox (5.21,0.79)-(12.91,5.35)
+#     dL |12.86 -  5.21| = 7.65     dT | 3.80 -  0.79| = 3.01
+#     dR |12.91 - 12.86| = 0.05     dB | 5.35 -  3.80| = 1.55
+#     dX = 0.05                     dY = 1.55
+#     dX < dY -> horizontal, and dR < dL -> right: (12.86,3.80)-(13.26,3.80)
+#
+# Note that this is the same answer "nearest of the four edges" gives, because
+# the nearest edge's axis IS the axis with the smaller of the two minima.  The
+# two-step form is written out anyway: it is the rule as stated, and it puts the
+# dX = dY case somewhere obvious instead of leaving it to the order four
+# candidates happen to be tested in.
+#
+# RIGHT is the answer to everything that cannot be worked out - no bbox, no
+# position, a degenerate box, or the axis tie above.  That is the spec's default.
+# One honest caveat: for a pin at an exact diagonal tie near the top-left of a
+# part, "right" points back through the part body.  It is a corner case of a
+# corner case - a pin is normally hard against the edge its wire leaves by, which
+# is what makes dX and dY differ by orders of magnitude in real data - and a
+# stub over the body is still on the right pin and still visible.
+#
+# A tie WITHIN the chosen axis (a pin exactly mid-way between the top and bottom
+# edges of a part wide enough for dY to still win) has no good answer either -
+# every direction goes through the body - so it is resolved the same way each
+# time rather than left to chance: up for the Y axis, right for the X axis.
+proc ::mUtilMenu::Rule5StubDir { pPoint pBBox } {
+    if { [llength $pPoint] != 2 || [llength $pBBox] != 4 } {
+        return "right"
+    }
+
+    set lX [lindex $pPoint 0]
+    set lY [lindex $pPoint 1]
+    set lL [lindex $pBBox 0]
+    set lT [lindex $pBBox 1]
+    set lR [lindex $pBBox 2]
+    set lB [lindex $pBBox 3]
+
+    set lDL [expr { abs($lX - $lL) }]
+    set lDR [expr { abs($lR - $lX) }]
+    set lDT [expr { abs($lY - $lT) }]
+    set lDB [expr { abs($lB - $lY) }]
+
+    set lDX [expr { $lDL < $lDR ? $lDL : $lDR }]
+    set lDY [expr { $lDT < $lDB ? $lDT : $lDB }]
+
+    # Step 1 - the axis.  Strictly nearer either way round, so dX == dY falls
+    # through both tests to the default at the bottom.
+    if { $lDX < $lDY } {
+        # Step 2 - the side.  <= so a pin mid-way between the two vertical edges
+        # keeps the default direction rather than picking left by accident.
+        if { $lDR <= $lDL } {
+            return "right"
+        }
+        return "left"
+    }
+    if { $lDY < $lDX } {
+        if { $lDT <= $lDB } {
+            return "up"
+        }
+        return "down"
+    }
+    return "right"
+}
+
+# One rule5 stub as a {x1 y1 x2 y2} quad: from the pin, pLen doc units in
+# pDir.  Anything other than the four directions grows to the right, which is the
+# same default Rule5StubDir falls back to.
+proc ::mUtilMenu::Rule5StubSeg { pPoint pDir pLen } {
+    set lX [lindex $pPoint 0]
+    set lY [lindex $pPoint 1]
+
+    switch -exact -- $pDir {
+        left    { return [list $lX $lY [expr { $lX - $pLen }] $lY] }
+        up      { return [list $lX $lY $lX [expr { $lY - $pLen }]] }
+        down    { return [list $lX $lY $lX [expr { $lY + $pLen }]] }
+        default { return [list $lX $lY [expr { $lX + $pLen }] $lY] }
+    }
+}
+
+# mRule5StubLen in doc units - GridTolDoc's conversion, not MarkOffsetDoc's.
+#
+# Same three modes and the same one-at-a-time degrading (grid falls back to user,
+# user falls back to doc, each saying so), because this is the same question
+# Search_Missing_connection_onGrid asks: how long is a thing quoted in grid steps
+# on THIS page.  See mRule5StubLenUnits for why a stub must not be measured in
+# the page's own user unit.
+#
+# The one thing it does that GridTolDoc does not is refuse to return 0.  A
+# tolerance of zero is a legitimate setting - it just matches nothing - but a stub
+# of zero is a zero-length line: an object on the page that draws nothing and can
+# still be selected and deleted afterwards, which is worse than no marker at all.
+proc ::mUtilMenu::Rule5StubDoc { pPage } {
+    variable mRule5StubLen
+
+    set lLen [::mUtilMenu::Rule5StubLenDoc $pPage]
+    if { $lLen < 1 } {
+        ::mUtilMenu::Trace "mRule5StubLen $mRule5StubLen converts to less than one doc unit on this page - drawing 1"
+        set lLen 1
+    }
+    return $lLen
+}
+
+# The conversion proper, split out so the three modes read as three modes.
+proc ::mUtilMenu::Rule5StubLenDoc { pPage } {
+    variable mRule5StubLen
+    variable mRule5StubLenUnits
+    variable mGridStepInch
+
+    if { $mRule5StubLenUnits eq "doc" || $pPage eq "" } {
+        return [expr { round($mRule5StubLen) }]
+    }
+
+    if { $mRule5StubLenUnits eq "grid" } {
+        set lDpi 0
+        catch { set lDpi [$pPage GetDocUnitsPerInch] }
+        if { $lDpi > 0 } {
+            return [expr { round(double($mRule5StubLen) * $mGridStepInch * $lDpi) }]
+        }
+        ::mUtilMenu::Trace "GetDocUnitsPerInch gave nothing on this page - taking mRule5StubLen as user units"
+    }
+
+    set lGran 0
+    catch { set lGran [$pPage GetPhysicalGranularity] }
+    if { $lGran <= 0 } {
+        ::mUtilMenu::Trace "no physical granularity on this page - taking mRule5StubLen as doc units"
+        return [expr { round($mRule5StubLen) }]
+    }
+    return [expr { round(double($mRule5StubLen) * $lGran) }]
+}
+
+# Part rows -> array of reference to row, with every reference that appears more
+# than once left OUT rather than resolved to one of them.  pDupName collects
+# those references so the caller can say what it skipped.
+proc ::mUtilMenu::PartsByRefUnique { pArrName pDupName pRows } {
+    upvar 1 $pArrName lArr
+    upvar 1 $pDupName lDup
+
+    array set lSeen {}
+    foreach lRow $pRows {
+        set lRef [lindex $lRow 0]
+        if { $lRef eq "" } {
+            continue
+        }
+        if { [info exists lSeen($lRef)] } {
+            incr lSeen($lRef)
+            continue
+        }
+        set lSeen($lRef) 1
+        set lArr($lRef)  $lRow
+    }
+
+    foreach lRef [lsort -dictionary [array names lSeen]] {
+        if { $lSeen($lRef) > 1 } {
+            unset -nocomplain lArr($lRef)
+            lappend lDup "$lRef (x$lSeen($lRef))"
+        }
+    }
+}
+
+# The pins of one part row, keyed on PinKey, duplicates dropped the same way and
+# for the same reason PartsByRefUnique drops duplicate references.
+proc ::mUtilMenu::PinsByKeyUnique { pArrName pRow } {
+    upvar 1 $pArrName lArr
+
+    array set lSeen {}
+    foreach lPin [lindex $pRow 10] {
+        set lKey [::mUtilMenu::PinKey $lPin]
+        if { $lKey eq "" } {
+            continue
+        }
+        if { [info exists lSeen($lKey)] } {
+            incr lSeen($lKey)
+            continue
+        }
+        set lSeen($lKey) 1
+        set lArr($lKey)  $lPin
+    }
+
+    foreach lKey [array names lSeen] {
+        if { $lSeen($lKey) > 1 } {
+            unset -nocomplain lArr($lKey)
+        }
+    }
+}
+
+# The rule itself.  Takes the two parts sections and fills mMarkPinSegs; returns
+# {findings skipped duplicates}:
+#
+#   findings   {ref pinKey pinName oNet nConn dir point} per loose pin, where
+#              point is {x y} doc units or {} when (N) would not give one
+#   skipped    the findings with no position - reported, never drawn
+#   duplicates the references that were ambiguous on one side or the other
+proc ::mUtilMenu::PartPinConnCompare { pRowsO pRowsN } {
+    variable mMarkPinSegs
+
+    array set lPartsO {}
+    array set lPartsN {}
+    set lDup [list]
+    ::mUtilMenu::PartsByRefUnique lPartsO lDup $pRowsO
+    ::mUtilMenu::PartsByRefUnique lPartsN lDup $pRowsN
+
+    set lFound   [list]
+    set lSkipped [list]
+
+    # (N)'s order, so the report reads in the order the parts walk found them
+    # rather than in whatever order an array hands its names back.
+    foreach lRowN $pRowsN {
+        set lRef [lindex $lRowN 0]
+        if { $lRef eq "" || ![info exists lPartsN($lRef)] \
+             || ![info exists lPartsO($lRef)] } {
+            continue
+        }
+        # The row out of the array and not the loop variable: a duplicate
+        # reference was taken out of lPartsN, and the test above is what drops it.
+        set lRowO [set lPartsO($lRef)]
+
+        array unset lPinsO
+        array unset lPinsN
+        array set   lPinsO {}
+        array set   lPinsN {}
+        ::mUtilMenu::PinsByKeyUnique lPinsO $lRowO
+        ::mUtilMenu::PinsByKeyUnique lPinsN $lRowN
+
+        foreach lPinN [lindex $lRowN 10] {
+            set lKey [::mUtilMenu::PinKey $lPinN]
+            if { $lKey eq "" || ![info exists lPinsN($lKey)] \
+                 || ![info exists lPinsO($lKey)] } {
+                continue
+            }
+
+            # Element 3 is the net label, "" for a pin on no net at all.  That is
+            # the test, and the no-connect MARKER (element 2) is deliberately not
+            # part of it: a pin the designer has crossed out is still a pin that
+            # used to carry a net, so it is still a change worth seeing.  Which of
+            # the two it is goes in the report - ConnStr words it - so a marked NC
+            # can be told from a bare unwired pin at a glance.
+            set lNetO [lindex [set lPinsO($lKey)] 3]
+            set lNetN [lindex $lPinN 3]
+            if { $lNetN ne "" || $lNetO eq "" } {
+                continue
+            }
+
+            set lPt  [lindex $lPinN 4]
+            set lRec [list $lRef $lKey [lindex $lPinN 0] $lNetO \
+                           [::mUtilMenu::PinConnStr $lPinN] "" $lPt]
+
+            if { [llength $lPt] != 2 } {
+                # No connection point on (N) - mPinPosAll off, or GetOffsetHotSpot
+                # would not answer.  Reported, not drawn: there is nowhere to put
+                # the stub, and a stub in the wrong place is worse than none.
+                lappend lSkipped $lRec
+                continue
+            }
+
+            set lDir [::mUtilMenu::Rule5StubDir $lPt [lindex $lRowN 9]]
+            lset lRec 5 $lDir
+            lappend lFound $lRec
+            lappend mMarkPinSegs [list "rule5 $lRef.$lKey" \
+                                       [lindex $lPt 0] [lindex $lPt 1] $lDir]
+        }
+    }
+
+    return [list $lFound $lSkipped [lsort -dictionary -unique $lDup]]
+}
+
+# Print what rule5 found and return the report-window text for it, "" when it
+# found nothing.  Same shape as PrintNetlistCompare, and for the same reason: the
+# Command Window gets every pin, the report window gets the roll-up.
+proc ::mUtilMenu::PrintPinConnCompare { pFound pSkipped pDup } {
+    variable mRule5StubLen
+    variable mRule5StubLenUnits
+
+    if { [llength $pFound] == 0 && [llength $pSkipped] == 0 \
+         && [llength $pDup] == 0 } {
+        return ""
+    }
+
+    ::mUtilMenu::Out "    net_compare_rule5 - pin unconnected on (N), on a net on (O); pink stub $mRule5StubLen $mRule5StubLenUnits out of the pin"
+
+    if { [llength $pDup] > 0 } {
+        ::mUtilMenu::Out "      reference not unique on one side - not compared ([llength $pDup])"
+        ::mUtilMenu::Out "        [join $pDup {, }]"
+    }
+
+    set lMsg ""
+
+    if { [llength $pFound] > 0 } {
+        ::mUtilMenu::Out "      loose pins ([llength $pFound])"
+        set lShort [list]
+        foreach lRec $pFound {
+            ::mUtilMenu::Out [format "        %-14s %-22s (O) net: %-24s (N) %s   stub %s" \
+                      "[lindex $lRec 0].[lindex $lRec 1]" [lindex $lRec 2] \
+                      [lindex $lRec 3] [lindex $lRec 4] [lindex $lRec 5]]
+            lappend lShort "[lindex $lRec 0].[lindex $lRec 1]"
+        }
+        append lMsg "  [format %-8s rule5] ([llength $pFound]) : [::mUtilMenu::RefListStr $lShort 0]\n"
+    }
+
+    # Listed apart from the findings above, never counted with them: a pin with no
+    # position is a difference nobody can be pointed at.
+    if { [llength $pSkipped] > 0 } {
+        ::mUtilMenu::Out "      no connection point on (N) - not marked ([llength $pSkipped])"
+        set lShort [list]
+        foreach lRec $pSkipped {
+            ::mUtilMenu::Out [format "        %-14s %-22s (O) net: %s" \
+                      "[lindex $lRec 0].[lindex $lRec 1]" [lindex $lRec 2] \
+                      [lindex $lRec 3]]
+            lappend lShort "[lindex $lRec 0].[lindex $lRec 1]"
+        }
+        append lMsg "  [format %-8s {rule5?}] ([llength $pSkipped]) : [::mUtilMenu::RefListStr $lShort 0]\n"
+    }
+
+    if { $lMsg eq "" } {
+        return ""
+    }
+    return "Pins (net_compare_rule5):\n$lMsg"
 }
 
 #-----------------------------------------------------------------------------
@@ -3780,13 +4574,20 @@ proc ::mUtilMenu::SigDiff { pSigsO pSigsN } {
 #               new net and get a line, and a net rewired between two parts that
 #               kept their wires used to get none.
 #   mMarkBoxes  a turquoise rectangle per new part, round its bounding box.
+#   mMarkPinSegs  a pink stub per pin net_compare_rule5 found loose - see
+#               PartPinConnCompare.  Not a wire marker at all: the pin it points
+#               at has no wire left on (N), which is what rule5 is about.
 #
 # Only New, not Remove: a Remove is something (O) has and (N) has not, so there is
-# nothing on (N)'s page to mark.
+# nothing on (N)'s page to mark.  Rule5 is the one finding that reads (O) for what
+# is MISSING on (N) and still has somewhere to draw it, because the pin survives
+# even when the net does not.
 proc ::mUtilMenu::DumpFullCompare { pDictO pDictN } {
     variable mMarkSegs
     variable mMarkBoxes
+    variable mMarkPinSegs
     variable mRefListMax
+    variable mRule5
 
     # {name dictKey sigsProc oneSigProc geomIndex listMax markKind}
     # geomIndex -1 / markKind "" = this category is not marked on the page.
@@ -3797,8 +4598,9 @@ proc ::mUtilMenu::DumpFullCompare { pDictO pDictN } {
         [list "Nets"    nets    ::mUtilMenu::NetSigs    ::mUtilMenu::NetSig  -1 0            ""] \
         [list "Buses"   buses   ::mUtilMenu::BusSigs    ::mUtilMenu::BusSig   3 0            line]]
 
-    set mMarkSegs  [list]
-    set mMarkBoxes [list]
+    set mMarkSegs    [list]
+    set mMarkBoxes   [list]
+    set mMarkPinSegs [list]
 
     # Both netlists, listed and then compared, before the section diff: the netlist
     # is what the net markers come from now, so it runs first and the Command Window
@@ -3846,6 +4648,21 @@ proc ::mUtilMenu::DumpFullCompare { pDictO pDictN } {
             set lSegSeen($lSeg) 1
             lappend mMarkSegs [linsert $lSeg 0 "rule[lindex $lRec 0] [lindex $lRec 4]"]
         }
+    }
+
+    # net_compare_rule5, straight after the netlist rules it belongs with and
+    # before the section diff, so the Command Window still reads in the order the
+    # work happens.  It fills mMarkPinSegs itself - the stubs are built off the
+    # pin records, not off anything the section diff produces.
+    set lPinMsg ""
+    if { $mRule5 } {
+        set lT     [::mUtilMenu::TimeNow]
+        set lPinCmp [::mUtilMenu::PartPinConnCompare \
+                         [dict get $pDictO parts] [dict get $pDictN parts]]
+        ::mUtilMenu::TimeMark "pin rule5" $lT
+
+        set lPinMsg [::mUtilMenu::PrintPinConnCompare \
+                         [lindex $lPinCmp 0] [lindex $lPinCmp 1] [lindex $lPinCmp 2]]
     }
 
     set lNewByCat  [list]
@@ -3906,13 +4723,22 @@ proc ::mUtilMenu::DumpFullCompare { pDictO pDictN } {
     }
     ::mUtilMenu::TimeMark "section diff" $lTDiff
 
-    if { !$lAny && [llength $lMovedPart] == 0 && $lNetMsg eq "" } {
+    if { !$lAny && [llength $lMovedPart] == 0 && $lNetMsg eq "" \
+         && $lPinMsg eq "" } {
         ::mUtilMenu::Out "    all the same"
         return "all the same"
     }
 
-    # The netlist rules first, because they are what is drawn on the page.
+    # The netlist rules first, because they are what is drawn on the page, and
+    # rule5 immediately after them - it is drawn too, and it is a net rule in
+    # everything but which walk it runs on.
     set lMsg $lNetMsg
+    if { $lPinMsg ne "" } {
+        if { $lMsg ne "" } {
+            append lMsg "\n"
+        }
+        append lMsg $lPinMsg
+    }
     foreach lBucket [list [list "New" $lNewByCat] [list "Remove" $lRemByCat]] {
         set lHead  [lindex $lBucket 0]
 
@@ -4429,7 +5255,7 @@ proc ::mUtilMenu::FindPageObjs { pDsnPath pSchName pPageName } {
 
     if { $lDesign == $lNullObj } {
         catch { $lStatus -delete }
-        error "design not found in session"
+        error "design not found in session: [file tail $pDsnPath]"
     }
 
     set lSchIter [$lDesign NewViewsIter $lStatus $::IterDefs_SCHEMATICS]
@@ -4458,8 +5284,13 @@ proc ::mUtilMenu::FindPageObjs { pDsnPath pSchName pPageName } {
     catch { delete_DboLibViewsIter $lSchIter }
     catch { $lStatus -delete }
 
+    # The DESIGN is named as well as the page.  Both sides of a compare usually
+    # have the same schematic name and the same page names - that is what makes
+    # them a pair - so "page not found: W980_WS / P02. VCORE" on its own does not
+    # say which of the two .DSN files was being looked in, and that is exactly the
+    # thing worth knowing when a page goes missing mid-run.
     if { $lFound == $lNullObj } {
-        error "page not found: $pSchName / $pPageName"
+        error "page not found in [file tail $pDsnPath]: $pSchName / $pPageName"
     }
     return [list $lFoundSch $lFound]
 }
@@ -4585,7 +5416,14 @@ proc ::mUtilMenu::DumpPages { pDsnPath } {
 # Page names in these designs carry markers ("*PAGE1", "--PAGE1", "~PAGE1") that
 # say something about the page's state, not about which page it is.  So the
 # compare runs on the name with those leading characters removed; what is left
-# has to match exactly (case included).
+# has to match exactly (case included) for the solid black "exact" line.
+#
+# Anything short of that is the red dashed "similar" line, and there are three
+# ways to earn it - see Page_name_mapping for the order they run in and why.
+# Two of them work on the COMPACTED name, which is the name with every
+# mPageNameRedundantChars character taken out of it wherever it sat, not just off
+# the front: that is what lets a page survive a renumbering that only moved the
+# separators about.
 #-----------------------------------------------------------------------------
 
 # Drop the leading marker characters off one page name.  Only the front is
@@ -4608,13 +5446,132 @@ proc ::mUtilMenu::PageKeyHead { pKey } {
     return [string range $pKey 0 [expr { $mPageSimilarChars - 1 }]]
 }
 
-# Pair column A's pages up with column B's, in two passes:
+# Take every mPageNameRedundantChars character OUT of a name, wherever it sits -
+# the front, the middle, the end.
 #
-#   exact    the stripped names are identical, case included
-#   similar  they are not, but their first mPageSimilarChars characters are
+#   "*096. BMC AST2600 UART,SPI,MAC"  ->  "096BMCAST2600UART,SPI,MAC"
 #
-# Both passes are greedy and first-come, and a page can only be claimed once - so
-# two pages in A that strip down to the same name are matched by the two pages in
+# string map and not string trim: trim and trimleft only reach the ends, and the
+# whole point here is the dots and the spaces in the MIDDLE of the name.  The map
+# is built one character to the empty string, which is also why the character set
+# needs no regexp escaping - "$" and "-" are plain data to string map, and a
+# bracket expression would have to escape both.
+proc ::mUtilMenu::StripPageNameRedundant { pName } {
+    variable mPageNameRedundantChars
+
+    set lMap [list]
+    foreach lChar [split $mPageNameRedundantChars ""] {
+        lappend lMap $lChar ""
+    }
+    return [string map $lMap $pName]
+}
+
+# The compacted form of a key, for the two similar passes that use it.  Takes a
+# KEY and not a {schematic page} pair, so it has the same signature as
+# PageKeyHead and PairSimilarPass can be handed any of the three.
+#
+# Safe to feed the already-prefix-stripped key because mPageNameRedundantChars is
+# a superset of mPageNamePrefixChars - see the variable's comment.
+proc ::mUtilMenu::PageKeyCompact { pKey } {
+    return [::mUtilMenu::StripPageNameRedundant $pKey]
+}
+
+# The leading slice of the compacted key - the loosest of the three similar
+# tests.  Returns "" when mPageCompactSimilarChars is 0, and PairSimilarPass
+# skips a page whose key comes back empty, which is how that turns the pass off.
+proc ::mUtilMenu::PageKeyCompactHead { pKey } {
+    variable mPageCompactSimilarChars
+
+    if { $mPageCompactSimilarChars <= 0 } {
+        return ""
+    }
+    return [string range [::mUtilMenu::PageKeyCompact $pKey] 0 \
+                [expr { $mPageCompactSimilarChars - 1 }]]
+}
+
+# One greedy pass of the "similar" matching, over whatever pass 1 and the earlier
+# similar passes left alone on BOTH sides.
+#
+# pKeyProc is what turns a page's key into the string this pass matches on -
+# PageKeyHead, PageKeyCompact or PageKeyCompactHead.  A page whose key comes back
+# empty is skipped, which is how mPageCompactSimilarChars 0 switches the
+# compacted-head pass off without a second flag.
+#
+# The three name arguments are the caller's variables, written in place: two
+# marks lists and the links list.  Passing them by name rather than returning
+# three new lists is what keeps the passes composable - each one sees the marks
+# the pass before it set, so a page already claimed cannot be claimed again.
+#
+# Returns how many pairs it made, for the trace line in Page_name_mapping.
+proc ::mUtilMenu::PairSimilarPass { pKeysA pKeysB pMarksAName pMarksBName \
+                                   pLinksName pKeyProc } {
+    upvar 1 $pMarksAName lMarksA
+    upvar 1 $pMarksBName lMarksB
+    upvar 1 $pLinksName  lLinks
+
+    # Per match string, the A indices still free, in column order.  Taking the
+    # first of them is what makes duplicates pair up one for one instead of all
+    # landing on the same page.
+    array set lFreeA {}
+    for { set i 0 } { $i < [llength $pKeysA] } { incr i } {
+        set lKey [lindex $pKeysA $i]
+        if { $lKey eq "" || [lindex $lMarksA $i] ne "none" } {
+            continue
+        }
+        set lMatch [$pKeyProc $lKey]
+        if { $lMatch eq "" } {
+            continue
+        }
+        lappend lFreeA($lMatch) $i
+    }
+
+    set lMade 0
+    for { set j 0 } { $j < [llength $pKeysB] } { incr j } {
+        set lKey [lindex $pKeysB $j]
+        if { $lKey eq "" || [lindex $lMarksB $j] ne "none" } {
+            continue
+        }
+        set lMatch [$pKeyProc $lKey]
+        if { $lMatch eq "" || ![info exists lFreeA($lMatch)] \
+             || [llength $lFreeA($lMatch)] == 0 } {
+            continue
+        }
+        set i              [lindex $lFreeA($lMatch) 0]
+        set lFreeA($lMatch) [lrange $lFreeA($lMatch) 1 end]
+
+        lset lMarksA $i similar
+        lset lMarksB $j similar
+        lappend lLinks [list $i $j similar]
+        incr lMade
+    }
+    return $lMade
+}
+
+# Pair column A's pages up with column B's.  One exact pass, then three similar
+# ones over what it left alone:
+#
+#   exact     the stripped names are identical, case included - black, solid line
+#   similar   any one of, tried in this order:
+#               1  the COMPACTED names are identical - both names with every
+#                  mPageNameRedundantChars character taken out, so "096. BMC
+#                  AST2600" and "096 - BMC  AST2600" are the same page
+#               2  the first mPageSimilarChars (10) characters of the stripped
+#                  names agree - the original rule
+#               3  the first mPageCompactSimilarChars (7) characters of the
+#                  COMPACTED names agree
+#             all three draw the same red dashed line; only which page gets
+#             paired with which can differ.
+#
+# WHY THAT ORDER.  Strictest first, because the passes are greedy and a page can
+# only be claimed once: a compacted-exact match is all but an exact match and has
+# to get first refusal on its counterpart, or a 10-character prefix agreement
+# with some other page could claim it away and leave the better pair unmade.
+# Pass 3 is the loosest and runs last for the same reason - 7 compacted
+# characters is roughly "the number and the start of the block name", which is
+# enough to be worth a dashed line and not enough to outrank the two above it.
+#
+# Every pass is greedy and first-come, and a page can only be claimed once - so
+# two pages in A that reduce to the same string are matched by the two pages in
 # B that do, one each, rather than both piling onto the first.
 #
 # Returns a dict:
@@ -4668,30 +5625,19 @@ proc ::mUtilMenu::Page_name_mapping { pPagesA pPagesB } {
         lappend lLinks [list $i $j exact]
     }
 
-    # Pass 2 - similar, over what pass 1 left alone on both sides.
-    array set lHeadA {}
-    for { set i 0 } { $i < [llength $lKeysA] } { incr i } {
-        set lKey [lindex $lKeysA $i]
-        if { $lKey ne "" && [lindex $lMarksA $i] eq "none" } {
-            lappend lHeadA([::mUtilMenu::PageKeyHead $lKey]) $i
-        }
-    }
+    # Passes 2a/2b/2c - similar, strictest first.  Each one only looks at pages
+    # every pass before it left "none", so the marks lists are the state that
+    # makes the three of them one rule with three ways to satisfy it.
+    foreach lPass [list \
+        [list "compacted names identical"      ::mUtilMenu::PageKeyCompact] \
+        [list "first 10 chars identical"       ::mUtilMenu::PageKeyHead] \
+        [list "first 7 compacted chars identical" ::mUtilMenu::PageKeyCompactHead]] {
 
-    for { set j 0 } { $j < [llength $lKeysB] } { incr j } {
-        set lKey [lindex $lKeysB $j]
-        if { $lKey eq "" || [lindex $lMarksB $j] ne "none" } {
-            continue
+        set lMade [::mUtilMenu::PairSimilarPass $lKeysA $lKeysB \
+                       lMarksA lMarksB lLinks [lindex $lPass 1]]
+        if { $lMade > 0 } {
+            ::mUtilMenu::Trace "page mapping: $lMade similar pair(s) - [lindex $lPass 0]"
         }
-        set lHead [::mUtilMenu::PageKeyHead $lKey]
-        if { ![info exists lHeadA($lHead)] || [llength $lHeadA($lHead)] == 0 } {
-            continue
-        }
-        set i             [lindex $lHeadA($lHead) 0]
-        set lHeadA($lHead) [lrange $lHeadA($lHead) 1 end]
-
-        lset lMarksA $i similar
-        lset lMarksB $j similar
-        lappend lLinks [list $i $j similar]
     }
 
     return [dict create marksA $lMarksA marksB $lMarksB links $lLinks]
@@ -5141,6 +6087,66 @@ proc ::mUtilMenu::MarkObjModified { pObj args } {
     return 0
 }
 
+# "Something on this page changed" - told to ALL THREE levels that need to hear
+# it, each with the arguments its own MarkModified takes.
+#
+# WHY THREE AND NOT ONE.  Marking the page alone is what every drawing path used
+# to do, and it is not enough: File > Save operates on the DESIGN, and a design
+# whose IsModified never went true is a design Capture may refuse to write -
+# ERROR(ORCAP-1650): Unable to save '...DSN', with Save As working because Save As
+# writes to a new path instead of updating a design it does not believe is dirty.
+# The rename path (StarPageObj) always marked all three and never saw the problem;
+# the marker path marked only the page, and that asymmetry is what this proc is
+# here to remove.  One place, so the next drawing path cannot get it half right.
+#
+# The design is reached the same way StarPageObj reaches it and for the same
+# reason: GetContainingLib is DECLARED as DboLib*, SWIG types the handle by the
+# declared type, and DboLib::MarkModified has nine overloads none of which accepts
+# NULL - so the lib handle must never be given NULL.  DboLib::GetName on a design
+# is its .DSN path, which is the key GetDesignAndSchematics wants, and FindDesign
+# turns that back into a real DboDesign whose MarkModified(NULL) is the sanctioned
+# call.  If that round trip fails, the lib gets the no-argument form instead,
+# which is the only shape that is safe on it.
+#
+# pSch is optional because not every caller has one - Schematic Check is handed a
+# DboPage by the Project Manager and never sees its schematic.  The DESIGN level
+# does not depend on it, and that is the level that matters for saving.
+#
+# Returns 1 when the design (or, failing that, the lib) was reached.
+proc ::mUtilMenu::MarkPageDirty { pPage {pSch ""} } {
+    if { $pPage eq "" || $pPage eq "NULL" } {
+        return 0
+    }
+
+    ::mUtilMenu::MarkObjModified $pPage
+    if { $pSch ne "" && $pSch ne "NULL" } {
+        ::mUtilMenu::MarkObjModified $pSch $pPage
+    }
+
+    set lLib ""
+    catch { set lLib [$pPage GetContainingLib] }
+    if { $lLib eq "" || $lLib eq "NULL" } {
+        ::mUtilMenu::Trace "no containing lib for this page - the DESIGN was not marked modified, and File > Save may refuse it"
+        return 0
+    }
+
+    set lDesign ""
+    set lPath [::mUtilMenu::CStr $lLib GetName]
+    if { $lPath ne "" } {
+        catch { set lDesign [::mUtilMenu::FindDesign $lPath] }
+    }
+
+    if { $lDesign ne "" && $lDesign ne "NULL" } {
+        catch { ::mUtilMenu::MarkObjModified $lDesign NULL }
+        return 1
+    }
+
+    # No DboDesign to be had - the lib, with the ONLY shape that is safe on it.
+    catch { ::mUtilMenu::MarkObjModified $lLib }
+    ::mUtilMenu::Trace "marked the lib rather than the design for [file tail $lPath] - File > Save may still refuse it"
+    return 1
+}
+
 # Draw one graphic line on an already-resolved DboPage.  pFrom / pTo are {x y}
 # pairs in doc units; pColor / pWidth / pStyle are DboValue enum names and default
 # to mMarkLineColor / mMarkLineWidth / mMarkLineStyle (see those for the style
@@ -5255,7 +6261,7 @@ proc ::mUtilMenu::DrawPageLine { pDsnPath pSchName pPageName pFrom pTo \
     set lPage [::mUtilMenu::FindPage $pDsnPath $pSchName $pPageName]
     set lLine [::mUtilMenu::DrawPageLineOn $lPage $pFrom $pTo $pColor $pWidth $pStyle]
 
-    ::mUtilMenu::MarkObjModified $lPage
+    ::mUtilMenu::MarkPageDirty $lPage
     catch { ZoomRedraw }
     return $lLine
 }
@@ -5278,6 +6284,26 @@ proc ::mUtilMenu::MarkOffsetDoc { pPage } {
         return [expr { round($mLineOffset) }]
     }
     return [expr { round(double($mLineOffset) * $lGran) }]
+}
+
+# One {x1 y1 x2 y2} doc-unit quad as the marker block prints it: the page's own
+# user unit first, so it can be read against the dump above, then the raw doc
+# integers in brackets, which are what actually went to Capture.
+#
+# Works for a bounding box as well as a segment - a CRect is the same four numbers
+# in the same order - so the line, the box and the stub all print alike.
+#
+# Coord is the same converter every other printed coordinate goes through, so a
+# stub at a pin prints the identical number the Parts dump printed for that pin.
+# With mCoordMode "doc" it returns the doc value and both halves say the same
+# thing, which is honest rather than clever.
+proc ::mUtilMenu::SegStr { pPage pQuad } {
+    return [format "(%s,%s)-(%s,%s) doc (%s,%s)-(%s,%s)" \
+        [::mUtilMenu::Coord $pPage [lindex $pQuad 0]] \
+        [::mUtilMenu::Coord $pPage [lindex $pQuad 1]] \
+        [::mUtilMenu::Coord $pPage [lindex $pQuad 2]] \
+        [::mUtilMenu::Coord $pPage [lindex $pQuad 3]] \
+        [lindex $pQuad 0] [lindex $pQuad 1] [lindex $pQuad 2] [lindex $pQuad 3]]
 }
 
 # Move one marker off the wire it marks, so it does not simply cover it.
@@ -5316,6 +6342,23 @@ proc ::mUtilMenu::OffsetSeg { pSeg pOffset } {
 #                 surrounds the thing rather than sitting next to it.  Parts that
 #                 only moved never reach here: DumpFullCompare takes them out of
 #                 the diff before the boxes are built (PartMoveFilter).
+#   pins          net_compare_rule5's stubs: a pink line whose FIRST end is the
+#                 pin's own connection point and whose second is
+#                 mRule5StubLen out of the part.  No offset either, and for a
+#                 stronger reason than the boxes - the stub means "this pin",
+#                 and a nudged stub means the pin next to it.  The length is
+#                 turned into doc units here rather than at compare time
+#                 because it is quoted in grid steps and only the page knows
+#                 how many doc units a step is.
+#
+# WHAT THE COORDINATES ARE PRINTED IN.  The page's own user unit, through the
+# same Coord every other coordinate in the dump goes through, with the raw doc
+# integers after it in brackets.  They used to be doc-only, which on a metric page
+# made the block impossible to check: the Parts dump says a pin is at
+# (128.02,19.30) mm and the marker block said the stub was at (504,76), and
+# nothing on the page said those were the same point.  Both are printed because
+# both are wanted - the user unit to match against the dump above, the doc
+# integers because those are what was actually handed to Capture.
 #
 # Does nothing when the compare found nothing new to mark.
 #
@@ -5325,29 +6368,41 @@ proc ::mUtilMenu::OffsetSeg { pSeg pOffset } {
 proc ::mUtilMenu::DrawMarkersOnPage { pFile pPair } {
     variable mMarkSegs
     variable mMarkBoxes
+    variable mMarkPinSegs
 
-    set lWanted [expr { [llength $mMarkSegs] + [llength $mMarkBoxes] }]
+    set lWanted [expr { [llength $mMarkSegs] + [llength $mMarkBoxes] \
+                        + [llength $mMarkPinSegs] }]
     if { $lWanted == 0 } {
-        ::mUtilMenu::Trace "nothing new in Parts/Nets/Buses - no markers"
+        ::mUtilMenu::Trace "nothing new in Parts/Nets/Buses and no loose pins - no markers"
         return 0
     }
     set lPair $pPair
 
-    # One page lookup for the whole batch: FindPage walks every schematic and page
-    # in the design, so calling it per marker would be quadratic on a real board.
-    if { [catch { set lPage [::mUtilMenu::FindPage $pFile \
+    # One page lookup for the whole batch: FindPageObjs walks every schematic and
+    # page in the design, so calling it per marker would be quadratic on a real
+    # board.
+    #
+    # FindPageObjs and not FindPage - the same walk, and it hands back the
+    # SCHEMATIC alongside the page for nothing extra (FindPage is a one-line
+    # wrapper that throws the schematic away).  MarkPageDirty wants it.
+    if { [catch { set lObjs [::mUtilMenu::FindPageObjs $pFile \
                                  [lindex $lPair 0] [lindex $lPair 1]] } lErr] } {
         ::mUtilMenu::Trace "markers failed on (N) [file tail $pFile] / [::mUtilMenu::PageLabel $lPair] -> $lErr"
         return 0
     }
+    set lSch  [lindex $lObjs 0]
+    set lPage [lindex $lObjs 1]
 
-    set lOffset [::mUtilMenu::MarkOffsetDoc $lPage]
-    set lDrawn  0
+    set lOffset  [::mUtilMenu::MarkOffsetDoc $lPage]
+    set lStubLen [::mUtilMenu::Rule5StubDoc  $lPage]
+    set lDrawn   0
 
     ::mUtilMenu::Out "----------------------------------------------------------------"
     ::mUtilMenu::Out "Markers on (N) [file tail $pFile] - [::mUtilMenu::PageLabel $lPair]"
     ::mUtilMenu::Out "  [llength $mMarkSegs] line(s), offset $lOffset doc units (mLineOffset $::mUtilMenu::mLineOffset $::mUtilMenu::mLineOffsetUnits)"
     ::mUtilMenu::Out "  [llength $mMarkBoxes] rectangle(s), on the bounding box as-is"
+    ::mUtilMenu::Out "  [llength $mMarkPinSegs] rule5 stub(s), $lStubLen doc units out of the pin = [::mUtilMenu::Coord $lPage $lStubLen] [::mUtilMenu::CoordUnitLabel $lPage] (mRule5StubLen $::mUtilMenu::mRule5StubLen $::mUtilMenu::mRule5StubLenUnits)"
+    ::mUtilMenu::Out "  coordinates below are [::mUtilMenu::CoordUnitLabel $lPage], raw doc units in brackets"
     ::mUtilMenu::Out "----------------------------------------------------------------"
 
     foreach lEntry $mMarkSegs {
@@ -5361,9 +6416,8 @@ proc ::mUtilMenu::DrawMarkersOnPage { pFile pPair } {
             continue
         }
         incr lDrawn
-        ::mUtilMenu::Out [format "    line %-30s (%s,%s)-(%s,%s) -> (%s,%s)-(%s,%s)" $lLabel \
-                  [lindex $lSeg 0] [lindex $lSeg 1] [lindex $lSeg 2] [lindex $lSeg 3] \
-                  [lindex $lAt  0] [lindex $lAt  1] [lindex $lAt  2] [lindex $lAt  3]]
+        ::mUtilMenu::Out [format "    line %-30s %s -> %s" $lLabel \
+                  [::mUtilMenu::SegStr $lPage $lSeg] [::mUtilMenu::SegStr $lPage $lAt]]
     }
 
     foreach lEntry $mMarkBoxes {
@@ -5375,12 +6429,30 @@ proc ::mUtilMenu::DrawMarkersOnPage { pFile pPair } {
             continue
         }
         incr lDrawn
-        ::mUtilMenu::Out [format "    box  %-30s (%s,%s)-(%s,%s)" $lLabel \
-                  [lindex $lBox 0] [lindex $lBox 1] [lindex $lBox 2] [lindex $lBox 3]]
+        ::mUtilMenu::Out [format "    box  %-30s %s" $lLabel \
+                  [::mUtilMenu::SegStr $lPage $lBox]]
     }
 
+    foreach lEntry $mMarkPinSegs {
+        set lLabel [lindex $lEntry 0]
+        set lSeg   [::mUtilMenu::Rule5StubSeg [lrange $lEntry 1 2] \
+                        [lindex $lEntry 3] $lStubLen]
+
+        if { [catch { ::mUtilMenu::DrawPageLineOn $lPage \
+                          [lrange $lSeg 0 1] [lrange $lSeg 2 3] } lErr] } {
+            ::mUtilMenu::Trace "rule5 stub for $lLabel at $lSeg failed -> $lErr"
+            continue
+        }
+        incr lDrawn
+        ::mUtilMenu::Out [format "    stub %-30s %s  %s" $lLabel \
+                  [::mUtilMenu::SegStr $lPage $lSeg] [lindex $lEntry 3]]
+    }
+
+    # Page, schematic AND design - see MarkPageDirty.  The design level is the one
+    # File > Save reads, and marking only the page is what left a drawn-on design
+    # refusing to save.
     if { $lDrawn > 0 } {
-        ::mUtilMenu::MarkObjModified $lPage
+        ::mUtilMenu::MarkPageDirty $lPage $lSch
         catch { ZoomRedraw }
     }
     ::mUtilMenu::Out "  ($lDrawn of $lWanted marker(s) drawn - File > Save to keep them)"
@@ -5504,21 +6576,13 @@ proc ::mUtilMenu::StarPageObj { pSch pPage } {
         return 0
     }
 
-    # All three levels, each with the arguments ITS OWN MarkModified takes - see
-    # MarkObjModified, which is where the three different shapes are written down.
-    # The design one is the reason that proc exists: it wants an occurrence, so the
-    # bare call this used to make never reached the database at all.
-    ::mUtilMenu::MarkObjModified $pPage
-    if { $pSch ne "" && $pSch ne "NULL" } {
-        ::mUtilMenu::MarkObjModified $pSch $pPage
-    }
-    if { $lDesign ne "" && $lDesign ne "NULL" } {
-        catch { ::mUtilMenu::MarkObjModified $lDesign NULL }
-    } elseif { $lLib ne "" && $lLib ne "NULL" } {
-        # No DboDesign to be had - mark the lib with the ONLY shape that is safe
-        # on it, which is the inherited no-argument one.
-        catch { ::mUtilMenu::MarkObjModified $lLib }
-    }
+    # All three levels - page, schematic, design.  This used to be written out
+    # here and nowhere else, which is exactly how the marker path came to mark
+    # only the page and leave designs that would not save; it is one shared proc
+    # now.  MarkPageDirty repeats the lib -> design lookup this proc already did
+    # above for the rename, which is one cheap call against the two of them
+    # never drifting apart again.
+    ::mUtilMenu::MarkPageDirty $pPage $pSch
     return 1
 }
 
@@ -5697,6 +6761,12 @@ proc ::mUtilMenu::RestorePMSelection { pFile } {
 
 # PageComp / Refcompare - both need exactly one ticked page per column and differ
 # only in which dump sections run.
+#
+# PageComp is the full compare: the four sections diffed as New/Remove, the two
+# netlists put through net_compare_rule1..4, and the two parts lists put through
+# net_compare_rule5 (a pin unconnected on (N) that was on a net on (O)).  Rule5
+# rides on the same dump - it needs no section of its own, only the pin detail
+# element 10 of a part row already carries.
 proc ::mUtilMenu::DoPageCompare { } {
     ::mUtilMenu::RunPageCompare [list parts symbols nets buses] "PageComp" full
 
@@ -5735,8 +6805,16 @@ proc ::mUtilMenu::DoPageRefCompare { } {
 #                    per-pair breakdown is not what a whole-design run is for.
 #                    Use PageComp on one pair when you want the numbers.
 #
-# Both are restored on the way out of an error as well, or the first pair that
-# failed would leave the Command Window mute for the rest of the session.
+# A third is turned ON for the (N) dump only, when mRule5 is on: mPinPosAll, so
+# every pin of that page reports its connection point and not only the pins that
+# are on a net.  Rule5 marks pins that are on NO net, so without it every finding
+# would come back with nowhere to put its stub.  (O) does not need it - all rule5
+# asks of that side is whether the pin had a net, which the dump always carries -
+# and that is why it is raised per side rather than round the pair: on a whole
+# design AllPagesComp would otherwise pay the extra pin walk twice per page.
+#
+# All three are restored on the way out of an error as well, or the first pair
+# that failed would leave the Command Window mute for the rest of the session.
 #
 # pQuiet 0 turns the suppression off, for running one pair from the Command Window
 # and watching what it does:
@@ -5748,14 +6826,19 @@ proc ::mUtilMenu::DoPageRefCompare { } {
 proc ::mUtilMenu::ComparePagePair { pFileA pPairA pFileB pPairB {pQuiet 1} } {
     variable mMarkSegs
     variable mMarkBoxes
+    variable mMarkPinSegs
     variable mQuiet
     variable mTimeCompare
+    variable mPinPosAll
+    variable mRule5
 
-    set mMarkSegs  [list]
-    set mMarkBoxes [list]
+    set mMarkSegs    [list]
+    set mMarkBoxes   [list]
+    set mMarkPinSegs [list]
 
-    set lSaveQuiet $mQuiet
-    set lSaveTime  $mTimeCompare
+    set lSaveQuiet  $mQuiet
+    set lSaveTime   $mTimeCompare
+    set lSavePinPos $mPinPosAll
     if { $pQuiet } {
         set mQuiet       1
         set mTimeCompare 0
@@ -5767,8 +6850,14 @@ proc ::mUtilMenu::ComparePagePair { pFileA pPairA pFileB pPairB {pQuiet 1} } {
         set lWhat  [list parts symbols nets buses]
         set lDataO [::mUtilMenu::DumpPageInfo $pFileA \
                         [lindex $pPairA 0] [lindex $pPairA 1] $lWhat]
+
+        # The extra pin-position read, (N) only - see the block comment.
+        if { [::mUtilMenu::NeedAllPinPos] } {
+            set mPinPosAll 1
+        }
         set lDataN [::mUtilMenu::DumpPageInfo $pFileB \
                         [lindex $pPairB 0] [lindex $pPairB 1] $lWhat]
+        set mPinPosAll $lSavePinPos
 
         ::mUtilMenu::DumpFullCompare $lDataO $lDataN
 
@@ -5779,6 +6868,7 @@ proc ::mUtilMenu::ComparePagePair { pFileA pPairA pFileB pPairB {pQuiet 1} } {
 
     set mQuiet       $lSaveQuiet
     set mTimeCompare $lSaveTime
+    set mPinPosAll   $lSavePinPos
 
     if { $lFail } {
         error $lErr
@@ -5800,18 +6890,60 @@ proc ::mUtilMenu::ComparePagePair { pFileA pPairA pFileB pPairB {pQuiet 1} } {
 # %-32s on each name so the result reads as a column down the run; a name longer
 # than that pushes its own line out rather than being cut - a truncated page name
 # cannot be looked up in the selector, a ragged column can still be read.
-proc ::mUtilMenu::PairDoneLine { pPairB pPairA pResult } {
-    ::mUtilMenu::Out [format "  (N) %-32s (O) %-32s Page comparison finished - %s" \
-              [lindex $pPairB 1] \
-              [lindex $pPairA 1] \
+#
+# The two side labels are parameters and not literals so the backward pass of
+# (N)(O)BOTH COMP can print "(O) ... (N) ..." and keep the same rule: the page
+# that was MARKED leads the line, whichever side that was this time.
+proc ::mUtilMenu::PairDoneLine { pPairMarked pPairOther pResult \
+                                 {pMarked "(N)"} {pOther "(O)"} } {
+    ::mUtilMenu::Out [format "  %s %-32s %s %-32s Page comparison finished - %s" \
+              $pMarked [lindex $pPairMarked 1] \
+              $pOther  [lindex $pPairOther 1] \
               $pResult]
+}
+
+# ::BOTH_N_O_COMP back to a plain 0 or 1, the way ChkItemsNormalize does it for
+# the Schematic Check boxes: it is a bare global anyone can set from the Command
+# Window, and Tk's checkbutton wants a value it can compare against onvalue.
+# Anything unset counts as ticked - that is the default the variable is created
+# with, and a run that quietly did half the work would be worse than one that did
+# all of it.
+proc ::mUtilMenu::BothCompNormalize { } {
+    set lOn 1
+    if { [info exists ::BOTH_N_O_COMP] } {
+        if { [catch { set lOn [expr { $::BOTH_N_O_COMP ? 1 : 0 }] }] } {
+            set lOn 1
+        }
+    }
+    set ::BOTH_N_O_COMP $lOn
+    return $lOn
 }
 
 # AllPagesComp - the SAME compare PageComp does, over every mapped page pair at
 # once instead of the one pair the checkboxes point at.  Same DumpPageInfo walk,
-# same DumpFullCompare, same net_compare_rule1..4 pink DASH lines, same turquoise
+# same DumpFullCompare, same net_compare_rule1..5 - the four netlist rules' pink
+# DASH lines, rule5's pink stubs at pins that came loose, and the turquoise
 # rectangles: ComparePagePair is PageComp's own path with the report window and the
-# printing taken off it.
+# printing taken off it, so a rule added there is a rule added here.
+#
+# BOTH DIRECTIONS.  With the selector's "(N)(O)BOTH COMP" box ticked - the
+# default, ::BOTH_N_O_COMP - every pair is run through ComparePagePair twice:
+#
+#   forward   (O) is the baseline, (N) is marked and renamed '*'.  What
+#             AllPagesComp has always done.
+#   backward  the two arguments swapped, so (N) is the baseline and (O) is the
+#             page that gets the pink lines and the turquoise rectangles.  (O) is
+#             NOT renamed - see ::BOTH_N_O_COMP for why the '*' stays on one side.
+#
+# The backward pass is not a repeat of the forward one.  Only the NEW side of a
+# diff is ever drawn, because a Remove has nowhere on the marked page to go - so
+# a part only (O) has, a net only (O) has, a pin (O) wired and (N) did not, all
+# of them draw nothing at all in the forward pass and are exactly what the
+# backward pass puts on (O)'s page.
+#
+# Markers drawn by the first pass cannot leak into the second one's dump: they
+# are DboGraphicLineInst and DboGraphicBoxInst, and all four collectors walk
+# nets, wires, part instances and net symbols - none of them looks at graphics.
 #
 # What it runs on is mPageLinks, Page_name_mapping's {indexA indexB kind} triples:
 # every page that has a line drawn to it in the selector, solid or dashed.  A page
@@ -5857,15 +6989,22 @@ proc ::mUtilMenu::DoTotalPageCompare { } {
         return
     }
 
-    set lPairs   0
-    set lChanged [list]
-    set lFailed  [list]
-    set lUnnamed [list]
+    set lPairs    0
+    set lChanged  [list]
+    set lFailed   [list]
+    set lUnnamed  [list]
+    set lChangedO [list]
+    set lFailedO  [list]
+
+    set lBoth [::mUtilMenu::BothCompNormalize]
 
     # One header, then one line per pair - the two file names are said once here
     # rather than on every line, which is what keeps the per-pair line short enough
     # to read down.
     ::mUtilMenu::Out "AllPagesComp - (N) [file tail $mPagesFileB]   (O) [file tail $mPagesFileA]"
+    if { $lBoth } {
+        ::mUtilMenu::Out "  (N)(O)BOTH COMP is on - every pair is compared both ways; only (N) is renamed"
+    }
 
     set lErr ""
     if { [catch {
@@ -5877,29 +7016,90 @@ proc ::mUtilMenu::DoTotalPageCompare { } {
             }
             incr lPairs
 
+            # BOTH COMPARES FIRST, THE RENAME AFTER THEM, THE PRINTING LAST.
+            #
+            # The rename cannot sit where it reads most naturally - at the end of
+            # the forward pass - because it invalidates the very name the backward
+            # pass is about to look (N)'s page up by.  MarkPageNameChanged turns
+            # "P02. VCORE" into "*P02. VCORE" in the database, while mPagesB still
+            # holds the name the selector was built with, so the backward pass
+            # went looking for a page that no longer answered to it:
+            #
+            #   (N) P02. VCORE  (O) P02. VCORE  ... 6 marker(s), '*' added
+            #   (O) P02. VCORE  (N) P02. VCORE  ... FAILED - page not found: W980_WS / P02. VCORE
+            #
+            # and every pair the forward pass found a difference on - exactly the
+            # pairs worth comparing the other way - failed backwards.  Renaming
+            # after both compares fixes it at the source rather than patching the
+            # stale name up afterwards: the '*' is a flag put on at the END of a
+            # pair's work, and nothing should be looked up by name after it.
+            #
+            # -1 is the failure sentinel throughout; ComparePagePair returns a
+            # marker count, which is never negative.
+            set lDrawn  -1
+            set lErrFwd ""
             if { [catch { set lDrawn [::mUtilMenu::ComparePagePair \
-                              $mPagesFileA $lPairA $mPagesFileB $lPairB] } lPairErr] } {
-                lappend lFailed "[::mUtilMenu::PageLabel $lPairB] ($lPairErr)"
-                ::mUtilMenu::PairDoneLine $lPairB $lPairA "FAILED - $lPairErr"
-                continue
-            }
-            if { $lDrawn <= 0 } {
-                ::mUtilMenu::PairDoneLine $lPairB $lPairA "no difference"
-                continue
+                              $mPagesFileA $lPairA $mPagesFileB $lPairB] } lErrFwd] } {
+                set lDrawn -1
             }
 
-            lappend lChanged [lindex $lPairB 1]
-            if { [catch { set lRenamed \
-                              [::mUtilMenu::MarkPageNameChanged $mPagesFileB $lPairB] } lPairErr] } {
-                set lRenamed 0
-                ::mUtilMenu::Trace "rename failed on [::mUtilMenu::PageLabel $lPairB] -> $lPairErr"
+            # Backward - the same call with the two designs the other way round,
+            # so (N) is the baseline and (O) is what gets drawn on.  No rename:
+            # the '*' belongs to (N) alone, see ::BOTH_N_O_COMP.
+            #
+            # Run even when the forward pass failed.  The two are separate
+            # compares and a forward failure is often one-sided - a page that
+            # would not open for marking still compares perfectly well as a
+            # baseline - so skipping it here would lose findings for no reason.
+            set lDrawnO -1
+            set lErrBwd ""
+            if { $lBoth } {
+                if { [catch { set lDrawnO [::mUtilMenu::ComparePagePair \
+                                  $mPagesFileB $lPairB $mPagesFileA $lPairA] } lErrBwd] } {
+                    set lDrawnO -1
+                }
             }
-            if { !$lRenamed } {
-                lappend lUnnamed [lindex $lPairB 1]
+
+            set lRenamed 0
+            if { $lDrawn > 0 } {
+                lappend lChanged [lindex $lPairB 1]
+                if { [catch { set lRenamed [::mUtilMenu::MarkPageNameChanged \
+                                  $mPagesFileB $lPairB] } lPairErr] } {
+                    set lRenamed 0
+                    ::mUtilMenu::Trace "rename failed on [::mUtilMenu::PageLabel $lPairB] -> $lPairErr"
+                }
+                if { !$lRenamed } {
+                    lappend lUnnamed [lindex $lPairB 1]
+                }
+            }
+
+            # (N)'s line first and (O)'s under it, whatever order the work
+            # happened in - the run is read as a column and the two lines of a
+            # pair belong together.
+            if { $lDrawn < 0 } {
+                lappend lFailed "[::mUtilMenu::PageLabel $lPairB] ($lErrFwd)"
+                ::mUtilMenu::PairDoneLine $lPairB $lPairA "FAILED - $lErrFwd"
+            } elseif { $lDrawn == 0 } {
+                ::mUtilMenu::PairDoneLine $lPairB $lPairA "no difference"
+            } elseif { !$lRenamed } {
                 ::mUtilMenu::PairDoneLine $lPairB $lPairA \
                     "$lDrawn marker(s), NOT renamed - already marked, or the rename was refused"
             } else {
                 ::mUtilMenu::PairDoneLine $lPairB $lPairA "$lDrawn marker(s), '*' added"
+            }
+
+            if { !$lBoth } {
+                continue
+            }
+            if { $lDrawnO < 0 } {
+                lappend lFailedO "[::mUtilMenu::PageLabel $lPairA] ($lErrBwd)"
+                ::mUtilMenu::PairDoneLine $lPairA $lPairB "FAILED - $lErrBwd" "(O)" "(N)"
+            } elseif { $lDrawnO == 0 } {
+                ::mUtilMenu::PairDoneLine $lPairA $lPairB "no difference" "(O)" "(N)"
+            } else {
+                lappend lChangedO [lindex $lPairA 1]
+                ::mUtilMenu::PairDoneLine $lPairA $lPairB \
+                    "$lDrawnO marker(s), page name left alone" "(O)" "(N)"
             }
         }
     } lErr] } {
@@ -5909,7 +7109,10 @@ proc ::mUtilMenu::DoTotalPageCompare { } {
         return
     }
 
-    ::mUtilMenu::Out "AllPagesComp - $lPairs page pair(s) compared, [llength $lChanged] changed"
+    ::mUtilMenu::Out "AllPagesComp - $lPairs page pair(s) compared, [llength $lChanged] (N) page(s) marked"
+    if { $lBoth } {
+        ::mUtilMenu::Out "AllPagesComp - backward pass: [llength $lChangedO] (O) page(s) marked, none renamed"
+    }
 
     catch { ZoomRedraw }
 
@@ -5926,11 +7129,31 @@ proc ::mUtilMenu::DoTotalPageCompare { } {
     if { [llength $lFailed] > 0 } {
         append lMsg "\n\nCould not be compared ([llength $lFailed]):\n[join $lFailed "\n"]"
     }
-    if { [llength $lChanged] > 0 } {
-        append lMsg "\n\nFile > Save to keep the markers and the new page names."
+
+    # The backward pass gets its own block, headed by the other design's name:
+    # everything above this point is about (N), and running the two lists together
+    # would leave no way to tell which file a page name belongs to.
+    if { $lBoth } {
+        append lMsg "\n\n(N)(O)BOTH COMP - marked on (O) [file tail $mPagesFileA],"
+        append lMsg " page names left alone:\n"
+        append lMsg "[llength $lChangedO] page(s) marked."
+        if { [llength $lChangedO] > 0 } {
+            append lMsg "\n\n[join $lChangedO "\n"]"
+        }
+        if { [llength $lFailedO] > 0 } {
+            append lMsg "\n\nCould not be compared ([llength $lFailedO]):\n[join $lFailedO "\n"]"
+        }
     }
 
-    ::mUtilMenu::Trace "AllPagesComp: $lPairs pair(s), [llength $lChanged] changed, [llength $lFailed] failed"
+    if { [llength $lChanged] > 0 || [llength $lChangedO] > 0 } {
+        append lMsg "\n\nFile > Save to keep the markers and the new page names"
+        if { [llength $lChangedO] > 0 } {
+            append lMsg " - BOTH designs were drawn on, so save both"
+        }
+        append lMsg "."
+    }
+
+    ::mUtilMenu::Trace "AllPagesComp: $lPairs pair(s), [llength $lChanged] (N) changed, [llength $lFailed] failed; backward [llength $lChangedO] (O) changed, [llength $lFailedO] failed"
 
     # Modal - so the selector goes away once the count has been read, not before.
     catch { capDisplayMessageBox $lMsg "Schematic Compare - AllPagesComp" }
@@ -5939,6 +7162,19 @@ proc ::mUtilMenu::DoTotalPageCompare { } {
     # Last, once every Tk window of ours is gone: renaming the pages emptied the
     # Project Manager's selection, and File > Save / Save As are both greyed out
     # until it has one again.  See RestorePMSelection.
+    #
+    # BOTH DESIGNS, each on its own count.  This used to run for (N) only and to
+    # test (N)'s list, which was right while (N) was the only side ever written
+    # to.  Since (N)(O)BOTH COMP the backward pass draws on (O) as well, so (O)
+    # needs the same treatment - and a run where only the backward pass found
+    # anything used to restore nothing at all, because the test was on $lChanged.
+    #
+    # (O) first so that (N) ends up the active Project Manager when both were
+    # touched: RestorePMSelection brings the design it is given to the front, and
+    # (N) is the side that was renamed and the one to look at next.
+    if { [llength $lChangedO] > 0 } {
+        ::mUtilMenu::RestorePMSelection $mPagesFileA
+    }
     if { [llength $lChanged] > 0 } {
         ::mUtilMenu::RestorePMSelection $mPagesFileB
     }
@@ -5951,12 +7187,16 @@ proc ::mUtilMenu::RunPageCompare { pWhat pLabel {pMode none} } {
     variable mPagesFileB
     variable mMarkSegs
     variable mMarkBoxes
+    variable mMarkPinSegs
+    variable mPinPosAll
+    variable mRule5
 
     # Cleared here as well as in DumpFullCompare, so a Refcompare - or a compare
     # that bails out below - cannot leave the previous Compare's findings sitting
     # there for DrawCompareMarkerLine to draw a second time.
-    set mMarkSegs  [list]
-    set mMarkBoxes [list]
+    set mMarkSegs    [list]
+    set mMarkBoxes   [list]
+    set mMarkPinSegs [list]
 
     ::mUtilMenu::TimeReset
     set lTAll [::mUtilMenu::TimeNow]
@@ -5977,8 +7217,17 @@ proc ::mUtilMenu::RunPageCompare { pWhat pLabel {pMode none} } {
 
     # Dump both pages to the Command Window before the message box, so the
     # detail is already there when the box is dismissed.  O first, then N.
+    #
+    # (N) is dumped with mPinPosAll raised when net_compare_rule5 is on and this
+    # is the full compare: rule5 marks pins that are on NO net, and without it
+    # those are exactly the pins the dump leaves without a position.  It shows in
+    # the printout too - (N)'s pin table gives coordinates for its NC pins where
+    # (O)'s prints "-" - and that asymmetry is the cheaper half of the trade:
+    # rule5 never asks (O) for a position, so making the two dumps look alike
+    # would double a pin walk for a column nothing reads.
     set lEmpty [list parts [list] symbols [list] nets [list] buses [list]]
     set lData  [list]
+    set lSavePinPos $mPinPosAll
     foreach lSide [list [list $mPagesFileA $lPairA O] [list $mPagesFileB $lPairB N]] {
         set lFile [lindex $lSide 0]
         set lPair [lindex $lSide 1]
@@ -5986,10 +7235,18 @@ proc ::mUtilMenu::RunPageCompare { pWhat pLabel {pMode none} } {
         ::mUtilMenu::Out "================================================================"
         ::mUtilMenu::Out "([lindex $lSide 2]) [file tail $lFile] - [::mUtilMenu::PageLabel $lPair]"
         ::mUtilMenu::Out "================================================================"
+
+        set mPinPosAll $lSavePinPos
+        if { $pMode eq "full" && [lindex $lSide 2] eq "N" \
+             && [::mUtilMenu::NeedAllPinPos] } {
+            set mPinPosAll 1
+        }
         if { [catch { set lRows [::mUtilMenu::DumpPageInfo $lFile \
                           [lindex $lPair 0] [lindex $lPair 1] $pWhat] } lErr] } {
             ::mUtilMenu::Trace "page dump failed for $lFile -> $lErr"
         }
+        set mPinPosAll $lSavePinPos
+
         lappend lData $lRows
     }
     set lMsg "Will $pLabel\n\n(O) [file tail $mPagesFileA] : [::mUtilMenu::PageLabel $lPairA]\n(N) [file tail $mPagesFileB] : [::mUtilMenu::PageLabel $lPairB]"
@@ -6009,7 +7266,7 @@ proc ::mUtilMenu::RunPageCompare { pWhat pLabel {pMode none} } {
         if { $pMode eq "ref" } {
             set lTitle "Reference compare (Parts by reference, Off-Page / Power / Ports by type + name)"
         } else {
-            set lTitle "Compare (Parts / Symbols / Nets / Buses)"
+            set lTitle "Compare (Parts / Symbols / Nets / Buses, net_compare_rule1..5)"
         }
         ::mUtilMenu::Out "================================================================"
         ::mUtilMenu::Out "$lTitle   O = [file tail $mPagesFileA]   N = [file tail $mPagesFileB]"
@@ -6208,9 +7465,21 @@ proc ::mUtilMenu::ShowPageSelector { pFileA pFileB } {
         -text "- - same first $mPageSimilarChars characters (similar)"
     label $lLegend.none -anchor w -foreground red \
         -text "red, no line: no counterpart"
+
+    # Not a legend entry - a setting, sitting on the legend row because that is
+    # the only strip of window between the columns and the buttons and the row is
+    # otherwise half empty.  It belongs to AllPagesComp; see ::BOTH_N_O_COMP for
+    # what it does and why only (N) is ever renamed either way.
+    #
+    # Bound straight to the bare global, so the box and the variable cannot
+    # disagree and the Command Window can set it before the selector is opened.
+    ::mUtilMenu::BothCompNormalize
+    checkbutton $lLegend.both -anchor w -text "(N)(O)BOTH COMP" \
+        -variable ::BOTH_N_O_COMP -onvalue 1 -offvalue 0
     pack $lLegend.same -side left -padx {2 12}
     pack $lLegend.near -side left -padx {0 12}
     pack $lLegend.none -side left
+    pack $lLegend.both -side left -padx {16 0}
     pack $lLegend -side top -fill x -pady {6 0}
 
     set lBtns $mPagesWin.btns
@@ -6344,6 +7613,15 @@ proc ::mUtilMenu::DoSchematicCompare { pVia } {
         return true
     }
 
+    # The two design fields are NOT cleared here.  They are namespace variables and
+    # keep whatever the last compare of this session used, which is what makes
+    # "compare the same pair again, one page further on" a matter of reopening the
+    # dialog and pressing Execute.
+    #
+    # The one thing that does empty them is moving the Default Folder - see
+    # BrowseInitDir.  A leftover path only goes stale when the work moves
+    # somewhere else, so that is where it is thrown away, rather than on every
+    # open.
     toplevel $mCmpWin
     wm title $mCmpWin "Schematic Compare"
     wm resizable $mCmpWin 1 0
@@ -7874,7 +9152,7 @@ proc ::mUtilMenu::MarkGridFindings { pPage pDict pFinds pThr } {
 
     # Once for the batch, not once per object - see DrawPageLineOn.
     if { $lDrawn > 0 } {
-        ::mUtilMenu::MarkObjModified $pPage
+        ::mUtilMenu::MarkPageDirty $pPage
         catch { ZoomRedraw }
     }
     set lNote ""
@@ -7950,7 +9228,7 @@ proc ::mUtilMenu::MarkNameConflicts { pPage pDict pConf } {
     }
 
     if { $lDrawn > 0 } {
-        ::mUtilMenu::MarkObjModified $pPage
+        ::mUtilMenu::MarkPageDirty $pPage
         catch { ZoomRedraw }
     }
     set lNote ""
