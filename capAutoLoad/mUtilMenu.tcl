@@ -512,6 +512,19 @@ namespace eval ::mUtilMenu {
     # Use ::mUtilMenu::DumpPages <dsn> to see all four against the real tree.
     variable mPageSortMode "dictionary"
 
+    # The longest object name Capture's database will accept.  A page renamed past
+    # it is taken in memory and rejected at save time, taking the whole design
+    # down with it:
+    #
+    #   ERROR(ORCAP-1650): Unable to save '...DSN'.
+    #   ERROR(ORDBDLL-1096): Invalid object name. Perhaps greater than 32 characters.
+    #
+    # 32 is the number the error message itself names.  StarPageObj is the only
+    # thing here that lengthens a name - by exactly the one '*' - and it now
+    # refuses rather than produce a design that cannot be written.  Lower this if
+    # a build turns out to be stricter than its own error message.
+    variable mPageNameMaxChars 32
+
     # Marker characters a page name may be prefixed with - "*PAGE1", "--PAGE1",
     # "~PAGE1" all mean PAGE1 as far as the A/B mapping is concerned, so they are
     # stripped off the front before the two names are compared.  Whitespace is in
@@ -1164,6 +1177,24 @@ namespace eval ::mUtilMenu {
     # the design's own root name is tried after it, for a bare .DSN opened without
     # a project.
     variable mPMSelectItem "Design Resources"
+
+    # How many times RestorePMSelection will go round its whole candidate list
+    # before giving up, and how long it lets the UI run between rounds.
+    #
+    # WHY IT NEEDS TO RETRY AT ALL.  Renaming a page makes Capture rebuild the
+    # Project Manager tree, and AllPagesComp renames once per changed page - a
+    # hundred and fifty times on a real design.  Those rebuilds are not finished
+    # when the loop is: they are still queued, and a rebuild that lands AFTER
+    # SelectPMItem takes the selection with it.  The design is then sitting there
+    # visibly modified with File > Save refusing it, which is exactly the
+    # ERROR(ORCAP-1650) that took three sessions to corner.
+    #
+    # It is also why the (O) side never showed the problem: (O) is never renamed,
+    # its tree is never rebuilt, and its selection stays put.
+    #
+    # mPMSettleMs 0 skips the settle entirely (update alone, no timed wait).
+    variable mPMSelectTries 3
+    variable mPMSettleMs    120
 
     # 1 = time the compare and print what each phase cost.  ON by default: the
     #     numbers are a few lines at the end of a dump that is already thousands,
@@ -6113,27 +6144,115 @@ proc ::mUtilMenu::MarkObjModified { pObj args } {
 # does not depend on it, and that is the level that matters for saving.
 #
 # Returns 1 when the design (or, failing that, the lib) was reached.
-proc ::mUtilMenu::MarkPageDirty { pPage {pSch ""} } {
+# Re-evaluate one page after its contents were changed.
+#
+# THE STEP THIS FILE WAS MISSING.  Every drawing path here writes objects straight
+# into the database with the Dbo API and then does MarkModified + ZoomRedraw.
+# Cadence's own code does one more thing between those two, five times over in
+# capFindAndReplace/tcl/capDesignUtil.tcl (:395, :474, :550, :626, :926), and
+# always in the same shape:
+#
+#     set lIsPageModified [$pPage IsModified $lStatus]
+#     if { $lIsPageModified == 1 } {
+#         catch {DboTclHelper_sEvalPage $pPage}
+#         catch {ZoomRedraw}
+#     }
+#
+# Writing objects with the Dbo API bypasses the command path Capture would
+# normally put a page change through, and that path is what evaluates the page
+# afterwards.  Leave it out and the page is flagged modified but never settled -
+# which on ONE page nobody notices, and on the ninety-five pages AllPagesComp
+# touches showed up as File > Save failing on the first press with
+# ERROR(ORCAP-1650) and working on the second.
+#
+# The call is declared in orDb_Dll_Tcl64.dll as
+#   o:DboTclHelper_sEvalPage pPage          (?sEvalPage@DboTclHelper@@SAXPEAVDboPage@@@Z)
+# - static, one DboPage*, returns void, so there is no status to read and nothing
+# to delete.  Appendix A does not document it; the DLL and Cadence's own use are
+# the whole of the evidence, which is why it is caught rather than trusted.
+#
+# Guarded on IsModified the way Cadence guards it: a page nothing changed does not
+# need evaluating, and on a whole-design run that is most of them.
+proc ::mUtilMenu::EvalPageIfModified { pPage } {
+    if { $pPage eq "" || $pPage eq "NULL" } {
+        return 0
+    }
+    if { [info commands DboTclHelper_sEvalPage] eq "" } {
+        ::mUtilMenu::Trace "DboTclHelper_sEvalPage is not in this Capture build - page not re-evaluated"
+        return 0
+    }
+
+    set lMod 0
+    catch {
+        set lStatus [DboState]
+        set lMod [$pPage IsModified $lStatus]
+        catch { $lStatus -delete }
+    }
+    if { $lMod != 1 } {
+        return 0
+    }
+
+    if { [catch { DboTclHelper_sEvalPage $pPage } lErr] } {
+        ::mUtilMenu::Trace "DboTclHelper_sEvalPage failed -> $lErr"
+        return 0
+    }
+    return 1
+}
+
+# pDsnPath is the .DSN the page belongs to, when the caller knows it - and the
+# Schematic Compare callers all do, because it is what they were asked to compare.
+# GIVE IT WHENEVER YOU HAVE IT.  Deriving the design from the page instead means
+# page -> GetContainingLib -> DboLib::GetName -> FindDesign, and that round trip
+# is only as good as the string GetName hands back: it has to come out in a form
+# "file normalize" and then GetDesignAndSchematics both accept.  On a .DSN opened
+# WITHOUT its .opj - which Schematic Compare does routinely, since it opens the
+# two .DSN files by path - that is not something to rely on, and when it fails
+# the design is never marked and File > Save has nothing to write.
+#
+# Returns 1 only when the DESIGN itself was marked.  0 means the page (and maybe
+# the schematic and the lib) were marked and the design was not - which is the
+# state that makes a visibly-changed page refuse to save, so callers should SAY
+# SO rather than swallow it.  That is the whole reason this returns anything: the
+# first version only wrote a Trace line, nobody saw it, and the symptom surfaced
+# as ERROR(ORCAP-1650) two machines later.
+proc ::mUtilMenu::MarkPageDirty { pPage {pSch ""} {pDsnPath ""} } {
     if { $pPage eq "" || $pPage eq "NULL" } {
         return 0
     }
 
     ::mUtilMenu::MarkObjModified $pPage
+
+    # Straight after the page is flagged and before anything else - this is where
+    # Cadence's own code puts it, and the flag is what it keys off.  See
+    # EvalPageIfModified for why leaving it out cost a failed first Save.
+    ::mUtilMenu::EvalPageIfModified $pPage
+
     if { $pSch ne "" && $pSch ne "NULL" } {
         ::mUtilMenu::MarkObjModified $pSch $pPage
     }
 
-    set lLib ""
-    catch { set lLib [$pPage GetContainingLib] }
-    if { $lLib eq "" || $lLib eq "NULL" } {
-        ::mUtilMenu::Trace "no containing lib for this page - the DESIGN was not marked modified, and File > Save may refuse it"
-        return 0
+    # The caller's path first - FindDesign normalises it the same way every other
+    # lookup in this file does, so it is the same key the design went in under.
+    set lDesign ""
+    if { $pDsnPath ne "" } {
+        catch { set lDesign [::mUtilMenu::FindDesign $pDsnPath] }
+        if { $lDesign eq "" || $lDesign eq "NULL" } {
+            ::mUtilMenu::Trace "FindDesign found nothing for [file tail $pDsnPath] - falling back to the page's own lib"
+        }
     }
 
-    set lDesign ""
-    set lPath [::mUtilMenu::CStr $lLib GetName]
-    if { $lPath ne "" } {
-        catch { set lDesign [::mUtilMenu::FindDesign $lPath] }
+    set lLib ""
+    catch { set lLib [$pPage GetContainingLib] }
+
+    # Derive it only when the caller had nothing to give, or gave something that
+    # did not resolve.
+    set lPath $pDsnPath
+    if { ($lDesign eq "" || $lDesign eq "NULL") \
+         && $lLib ne "" && $lLib ne "NULL" } {
+        set lPath [::mUtilMenu::CStr $lLib GetName]
+        if { $lPath ne "" } {
+            catch { set lDesign [::mUtilMenu::FindDesign $lPath] }
+        }
     }
 
     if { $lDesign ne "" && $lDesign ne "NULL" } {
@@ -6141,10 +6260,13 @@ proc ::mUtilMenu::MarkPageDirty { pPage {pSch ""} } {
         return 1
     }
 
-    # No DboDesign to be had - the lib, with the ONLY shape that is safe on it.
-    catch { ::mUtilMenu::MarkObjModified $lLib }
-    ::mUtilMenu::Trace "marked the lib rather than the design for [file tail $lPath] - File > Save may still refuse it"
-    return 1
+    # No DboDesign to be had.  The lib is marked with the ONLY shape that is safe
+    # on it - the inherited no-argument one - but that is not the same thing and
+    # the caller is told so.
+    if { $lLib ne "" && $lLib ne "NULL" } {
+        catch { ::mUtilMenu::MarkObjModified $lLib }
+    }
+    return 0
 }
 
 # Draw one graphic line on an already-resolved DboPage.  pFrom / pTo are {x y}
@@ -6261,7 +6383,7 @@ proc ::mUtilMenu::DrawPageLine { pDsnPath pSchName pPageName pFrom pTo \
     set lPage [::mUtilMenu::FindPage $pDsnPath $pSchName $pPageName]
     set lLine [::mUtilMenu::DrawPageLineOn $lPage $pFrom $pTo $pColor $pWidth $pStyle]
 
-    ::mUtilMenu::MarkPageDirty $lPage
+    ::mUtilMenu::MarkPageDirty $lPage "" $pDsnPath
     catch { ZoomRedraw }
     return $lLine
 }
@@ -6450,9 +6572,15 @@ proc ::mUtilMenu::DrawMarkersOnPage { pFile pPair } {
 
     # Page, schematic AND design - see MarkPageDirty.  The design level is the one
     # File > Save reads, and marking only the page is what left a drawn-on design
-    # refusing to save.
+    # refusing to save.  $pFile is handed over because this proc knows it and the
+    # page does not reliably.
     if { $lDrawn > 0 } {
-        ::mUtilMenu::MarkPageDirty $lPage $lSch
+        if { ![::mUtilMenu::MarkPageDirty $lPage $lSch $pFile] } {
+            # Out and not Trace: a design that was drawn on but never marked
+            # modified is one File > Save will refuse, and that has to be visible
+            # in the same log the markers were just listed in.
+            ::mUtilMenu::Out "  *** [file tail $pFile] could NOT be marked modified - File > Save will refuse it (use Save As, and check the .opj is there)"
+        }
         catch { ZoomRedraw }
     }
     ::mUtilMenu::Out "  ($lDrawn of $lWanted marker(s) drawn - File > Save to keep them)"
@@ -6497,7 +6625,7 @@ proc ::mUtilMenu::MarkPageNameChanged { pFile pPair } {
     }
 
     set lObjs [::mUtilMenu::FindPageObjs $pFile $lSchName $lPageName]
-    return [::mUtilMenu::StarPageObj [lindex $lObjs 0] [lindex $lObjs 1]]
+    return [::mUtilMenu::StarPageObj [lindex $lObjs 0] [lindex $lObjs 1] $pFile]
 }
 
 # The rename itself, from the objects rather than from {file schematic page}.
@@ -6535,14 +6663,39 @@ proc ::mUtilMenu::MarkPageNameChanged { pFile pPair } {
 #
 # Returns 1 when the page came back with the new name, 0 otherwise - including
 # when it was already marked, which is not a failure and not a second '*'.
-proc ::mUtilMenu::StarPageObj { pSch pPage } {
+proc ::mUtilMenu::StarPageObj { pSch pPage {pDsnPath ""} } {
+    variable mPageNameMaxChars
+
     set lPageName [::mUtilMenu::CStr $pPage GetName]
     if { [string index $lPageName 0] eq "*" } {
         ::mUtilMenu::Trace "page $lPageName is already marked - left alone"
         return 0
     }
 
-    set lNew  "*$lPageName"
+    set lNew "*$lPageName"
+
+    # THE 32-CHARACTER LIMIT.  Capture's database refuses an object name longer
+    # than this, and the refusal does not happen at Rename time - DboSchematic::
+    # Rename takes the long name, the '*' appears in the Project Manager, and
+    # everything looks fine until the design is written, where it comes back as
+    #
+    #   ERROR(ORCAP-1650): Unable to save '...DSN'.
+    #   ERROR(ORDBDLL-1096): Invalid object name. Perhaps greater than 32 characters.
+    #
+    # One page over the limit makes the WHOLE DESIGN unsaveable, which is how this
+    # presented: a compare that ran perfectly and then would not save, with
+    # nothing in the compare's own output to say why.
+    #
+    # So the star is not added when it would not fit.  The page keeps its markers
+    # - those are what the run is for - and is reported as changed-but-not-renamed,
+    # which is the bucket that already exists for a page that could not be starred.
+    # Renaming it to something shorter is not on: the name is the user's, and a
+    # marker tool has no business truncating it.
+    if { [string length $lNew] > $mPageNameMaxChars } {
+        ::mUtilMenu::Trace "page \"$lPageName\" is [string length $lPageName] characters - starring it would make [string length $lNew], over the $mPageNameMaxChars limit; left unrenamed so the design stays saveable"
+        return 0
+    }
+
     set lCStr [DboTclHelper_sMakeCString $lNew]
 
     # The containing lib, as a DboLib handle - fine for RenameObject, never for
@@ -6582,7 +6735,7 @@ proc ::mUtilMenu::StarPageObj { pSch pPage } {
     # now.  MarkPageDirty repeats the lib -> design lookup this proc already did
     # above for the rename, which is one cheap call against the two of them
     # never drifting apart again.
-    ::mUtilMenu::MarkPageDirty $pPage $pSch
+    ::mUtilMenu::MarkPageDirty $pPage $pSch $pDsnPath
     return 1
 }
 
@@ -6716,9 +6869,68 @@ proc ::mUtilMenu::FindDesign { pDsnPath } {
 #
 # Nothing here writes to the design; the worst a failure can do is leave the
 # selection where it was, which is the behaviour without this proc at all.
+# Let Capture's own UI run for a moment.
+#
+# "update" drains what is already queued; the timed wait after it is for work
+# Capture posts to ITSELF - a Project Manager tree rebuild is not finished when
+# the call that triggered it returns, and nothing in Tcl can be asked to wait for
+# it.  vwait on an "after" is the only portable way to let the application have
+# the processor without returning to the caller.
+#
+# Everything is caught.  This is a courtesy to the UI, never a dependency: a
+# Capture build where Tk is not loaded, or where "update" is unhappy, must still
+# run the compare.
+proc ::mUtilMenu::SettleUI { {pMs -1} } {
+    variable mPMSettleMs
+
+    if { $pMs < 0 } {
+        set pMs $mPMSettleMs
+    }
+    catch { update }
+    if { $pMs > 0 } {
+        catch {
+            set lTok "::mUtilMenu::settle[clock clicks]"
+            after $pMs [list set $lTok 1]
+            vwait $lTok
+            unset -nocomplain $lTok
+        }
+    }
+    catch { update }
+    return 1
+}
+
+# What the Project Manager currently has selected, "" when nothing.
+#
+# The point of having this separate is that SelectPMItem NOT THROWING is not the
+# same as the selection having taken.  RestorePMSelection believed the return
+# code for three versions and reported success on runs where the tree rebuild
+# afterwards had wiped the selection straight back out again.
+proc ::mUtilMenu::PMSelection { } {
+    set lItems ""
+    catch { set lItems [GetSelectedPMItems] }
+    return [string trim $lItems]
+}
+
+# Put the Project Manager back on one design and give it a selected item again.
+#
+# See the block comment above for why the selection disappears in the first
+# place.  Two things this does that the first version did not:
+#
+#   VERIFY   after each SelectPMItem, ask GetSelectedPMItems what is actually
+#            selected.  Empty means it did not take, whatever SelectPMItem
+#            returned.
+#   RETRY    the whole candidate list, up to mPMSelectTries times, with the UI
+#            allowed to run in between.  A selection wiped by a rebuild that was
+#            still queued is put back by the next round, once that rebuild has
+#            landed.
+#
+# Ordered so the cheapest and most likely candidate goes first.  All three are
+# tried every round rather than remembering which one worked: the tree the round
+# before last was selecting in may have been rebuilt since.
 proc ::mUtilMenu::RestorePMSelection { pFile } {
     variable mRestorePM
     variable mPMSelectItem
+    variable mPMSelectTries
 
     if { !$mRestorePM || $pFile eq "" } {
         return 0
@@ -6743,20 +6955,31 @@ proc ::mUtilMenu::RestorePMSelection { pFile } {
     }
     lappend lNames [file rootname [file tail $pFile]]
 
-    set lDone 0
-    foreach lName $lNames {
-        if { [catch { SelectPMItem $lName } lErr] } {
-            ::mUtilMenu::Trace "SelectPMItem \"$lName\" failed -> $lErr"
-            continue
+    for { set lTry 1 } { $lTry <= $mPMSelectTries } { incr lTry } {
+        # Before the first attempt as well as between rounds: the renames that
+        # made this necessary were the last thing to happen.
+        ::mUtilMenu::SettleUI
+
+        foreach lName $lNames {
+            if { [catch { SelectPMItem $lName } lErr] } {
+                ::mUtilMenu::Trace "SelectPMItem \"$lName\" failed -> $lErr"
+                continue
+            }
+            set lSel [::mUtilMenu::PMSelection]
+            if { $lSel eq "" } {
+                ::mUtilMenu::Trace "SelectPMItem \"$lName\" returned without error but nothing is selected (try $lTry)"
+                continue
+            }
+            ::mUtilMenu::Trace "PM selection restored on [file tail $pFile] via \"$lName\" -> $lSel (try $lTry)"
+            return 1
         }
-        ::mUtilMenu::Trace "PM selection restored on [file tail $pFile] via \"$lName\""
-        set lDone 1
-        break
     }
-    if { !$lDone } {
-        ::mUtilMenu::Trace "PM selection NOT restored on [file tail $pFile] - File > Save may still be greyed out; click the design in the Project Manager once"
-    }
-    return $lDone
+
+    # Said out loud, not just traced: a design nobody can save is worth a line in
+    # the same window the run just finished printing to.
+    ::mUtilMenu::Out "  *** could not give [file tail $pFile] a Project Manager selection after $mPMSelectTries tries"
+    ::mUtilMenu::Out "      File > Save will refuse it - click the design once in the Project Manager, then Save"
+    return 0
 }
 
 # PageComp / Refcompare - both need exactly one ticked page per column and differ
@@ -7083,7 +7306,7 @@ proc ::mUtilMenu::DoTotalPageCompare { } {
                 ::mUtilMenu::PairDoneLine $lPairB $lPairA "no difference"
             } elseif { !$lRenamed } {
                 ::mUtilMenu::PairDoneLine $lPairB $lPairA \
-                    "$lDrawn marker(s), NOT renamed - already marked, or the rename was refused"
+                    "$lDrawn marker(s), NOT renamed - already marked, or starring the name would pass the $::mUtilMenu::mPageNameMaxChars-character limit"
             } else {
                 ::mUtilMenu::PairDoneLine $lPairB $lPairA "$lDrawn marker(s), '*' added"
             }
@@ -7124,7 +7347,7 @@ proc ::mUtilMenu::DoTotalPageCompare { } {
         append lMsg "\n\n[join $lChanged "\n"]"
     }
     if { [llength $lUnnamed] > 0 } {
-        append lMsg "\n\nChanged but NOT renamed ([llength $lUnnamed]) - already marked, or the rename was refused:\n[join $lUnnamed "\n"]"
+        append lMsg "\n\nChanged but NOT renamed ([llength $lUnnamed]) - already marked, or starring the name would pass Capture's $::mUtilMenu::mPageNameMaxChars-character object-name limit:\n[join $lUnnamed "\n"]"
     }
     if { [llength $lFailed] > 0 } {
         append lMsg "\n\nCould not be compared ([llength $lFailed]):\n[join $lFailed "\n"]"
@@ -7172,8 +7395,16 @@ proc ::mUtilMenu::DoTotalPageCompare { } {
     # (O) first so that (N) ends up the active Project Manager when both were
     # touched: RestorePMSelection brings the design it is given to the front, and
     # (N) is the side that was renamed and the one to look at next.
+    #
+    # SettleUI between them, and once before either: every rename in the loop
+    # above queued a Project Manager tree rebuild, and a rebuild landing after a
+    # SelectPMItem takes the selection away again.  RestorePMSelection settles and
+    # retries on its own as well - this is the coarse one, so the two designs do
+    # not restore into the middle of each other's rebuilds.
+    ::mUtilMenu::SettleUI
     if { [llength $lChangedO] > 0 } {
         ::mUtilMenu::RestorePMSelection $mPagesFileA
+        ::mUtilMenu::SettleUI
     }
     if { [llength $lChanged] > 0 } {
         ::mUtilMenu::RestorePMSelection $mPagesFileB
@@ -7564,6 +7795,7 @@ proc ::mUtilMenu::DoSchematicCompareExecute { } {
                                          "Schematic Compare" }
         }
     }
+    ::mUtilMenu::WarnMissingOpj [list $lA $lB]
 
     # Both designs are in the session now - let the user pick pages.
     if { [catch { ::mUtilMenu::ShowPageSelector $lA $lB } lErr] } {
@@ -7571,6 +7803,56 @@ proc ::mUtilMenu::DoSchematicCompareExecute { } {
         catch { capDisplayMessageBox "Could not build the page list:\n\n$lErr" \
                                      "Schematic Compare" }
     }
+}
+
+# Say so, up front, when a .DSN about to be compared has no .opj beside it.
+#
+# Schematic Compare is given .DSN paths and opens them with Open(pPath), so a
+# design whose project file is missing still opens, still compares and still gets
+# drawn on - and then File > Save fails with
+#
+#   ERROR(ORCAP-1650): Unable to save '...DSN'
+#
+# because Save goes through the project and there is no project.  Save As works,
+# which is what makes it look like a tool bug rather than a missing file.  It cost
+# two machines and a morning to find; one line at the start is cheaper.
+#
+# Only the .opj sitting beside the .DSN under the same root name is looked for.
+# That is Capture's own convention and the one GetActiveOpjName reports back -
+# and when it is absent, the name GetActiveOpjName gives is a path to a file that
+# does not exist, which is the tell.  A project genuinely kept somewhere else
+# would be a false alarm here; it says "check", not "this is broken".
+#
+# A warning and not a refusal: the compare itself is perfectly valid without a
+# project, the dumps and the report are worth having, and Save As keeps the
+# markers.  Returns the list of .DSN files that had no .opj.
+proc ::mUtilMenu::WarnMissingOpj { pFiles } {
+    set lBad [list]
+    foreach lFile $pFiles {
+        if { $lFile eq "" } {
+            continue
+        }
+        set lOpj "[file rootname [file normalize $lFile]].opj"
+        if { ![file exists $lOpj] } {
+            lappend lBad $lFile
+        }
+    }
+    if { [llength $lBad] == 0 } {
+        return $lBad
+    }
+
+    ::mUtilMenu::Out "----------------------------------------------------------------"
+    ::mUtilMenu::Out "Schematic Compare - NO .opj FOUND for [llength $lBad] of the two designs"
+    foreach lFile $lBad {
+        ::mUtilMenu::Out "    [file tail $lFile]   (expected [file tail [file rootname $lFile]].opj beside it)"
+    }
+    ::mUtilMenu::Out "  The compare will run and the markers will be drawn, but File > Save"
+    ::mUtilMenu::Out "  on that design will fail with ERROR(ORCAP-1650) - Save goes through the"
+    ::mUtilMenu::Out "  project and there is none.  Use File > Save As, or open the design from"
+    ::mUtilMenu::Out "  its .opj instead of its .DSN."
+    ::mUtilMenu::Out "----------------------------------------------------------------"
+    ::mUtilMenu::Trace "no .opj for: [join $lBad {, }]"
+    return $lBad
 }
 
 proc ::mUtilMenu::CloseSchematicCompare { } {
