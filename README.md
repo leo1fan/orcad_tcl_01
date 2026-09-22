@@ -12,6 +12,7 @@
 
 > [!WARNING]
 > **這不是 Cadence 原廠檔案。** 安裝 Capture hotfix 會把 `capAutoLoad` 底下它不認得的檔案刪掉，`mUtilMenu.tcl` 也在內。請在 Cadence 安裝目錄以外另存一份，升版後放回去。
+<img width="575" height="323" alt="orcad-compare-01" src="https://github.com/user-attachments/assets/9c217f37-a7d5-405a-a847-6d7e1cf31738" />
 
 ---
 
