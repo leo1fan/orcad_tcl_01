@@ -1,4 +1,4 @@
-<img width="212" height="149" alt="Selection item" src="https://github.com/user-attachments/assets/71d55245-2e87-40cc-b620-93437146a32e" />
+
 # mUtil — OrCAD Capture 17.4 自製工具選單
 
 **新舊版線路比對 · NETs 線距過近檢查 · BOM footprint 反查**
@@ -22,7 +22,7 @@
 
 > [!WARNING]
 > **這不是 Cadence 原廠檔案。** 安裝 Capture hotfix 會把 `capAutoLoad` 底下它不認得的檔案刪掉，`mUtilMenu.tcl` 也在內。請在 Cadence 安裝目錄以外另存一份，升版後放回去。
-
+<img width="212" height="149" alt="Selection item" src="https://github.com/user-attachments/assets/71d55245-2e87-40cc-b620-93437146a32e" />
 <img width="575" height="323" alt="orcad-compare-01" src="https://github.com/user-attachments/assets/9c217f37-a7d5-405a-a847-6d7e1cf31738" />
 
 ---
