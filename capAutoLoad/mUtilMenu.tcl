@@ -21,7 +21,7 @@
 #  company are carried, not announced - nothing in normal operation shows them,
 #  and About / diag are where to look.
 #
-#  Adds a top-level "mUtil" menu, plus the SAME two commands under
+#  Adds a top-level "mUtil" menu, plus the SAME commands under
 #  Accessories > mUtil, so the two menu mechanisms can be compared:
 #
 #     mUtil        -> built with InsertXMLMenu   (undocumented, Cadence-internal)
@@ -54,6 +54,18 @@
 #                          pages, not two.  The report goes in a read-only text
 #                          window, not a message box, so it can be selected and
 #                          copied.  See the Schematic Check block.
+#     BOM Footprint Check -> Tk dialog: one .xlsx field + Browse, Execute / Close.
+#                          Close does nothing.  Execute prints the workbook's
+#                          text to the Command Window, sheet by sheet, one line
+#                          per row, and LEAVES THE DIALOG UP so the next file is
+#                          a Browse away.  That is all it does so far - the
+#                          footprint comparison itself is the next step, and
+#                          reading the file is what it has to be built on.
+#                          The .xlsx is unzipped and its XML parsed in here -
+#                          Capture's Tcl has neither vfs::zip nor tcom, but it
+#                          does have the 8.6 core's "zlib inflate".  See the BOM
+#                          Footprint Check block, and read the note on Tcl
+#                          greediness in it before touching any pattern there.
 #     Close Page        -> walks EVERY design the session has open, one at a
 #                          time, and closes that project's pages while leaving
 #                          its Project Manager standing.  The project that was
@@ -358,7 +370,7 @@ namespace eval ::mUtilMenu {
     # returns them, diag prints them - and deliberately nowhere else: a dump is
     # for reading schematic data, not for reading a byline, and the column
     # alignment in those dumps is worked out to the character.
-    variable mVersion "1.01"
+    variable mVersion "1.02"
     variable mAuthor  "LEO"
     variable mCompany "ASROCK"
 
@@ -1038,6 +1050,125 @@ namespace eval ::mUtilMenu {
     set ::SCH_CHECK_ITEM1 1
     set ::SCH_CHECK_ITEM2 1
 
+    # BOM Footprint Check dialog state - one .xlsx field with its own Browse...,
+    # and Execute / Close underneath.
+    #
+    #   mBomWin    the toplevel, kept in a variable for the same reason mChkWin is:
+    #              a second menu click raises the dialog that is already open
+    #              instead of building another one.
+    #   mBomFile   the .xlsx the field holds.  A namespace variable and not a local,
+    #              so it survives Close and the dialog reopens on the same file -
+    #              the same bargain mCmpFileA / mCmpFileB strike for the two designs.
+    #
+    #              STARTS EMPTY EVERY SESSION, and is deliberately NOT written to
+    #              mUtilMenu.cfg.  Only the FOLDER is remembered across restarts,
+    #              below.  A BOM is revised far more often than the design it goes
+    #              with, so a path restored from a file written last week names a
+    #              revision that has very likely been superseded - and Execute is
+    #              one click from a field that already looks filled in.  An empty
+    #              field cannot be Executed by accident; it says "choose one".
+    variable mBomWin  ".mUtilBomCheck"
+    variable mBomFile ""
+
+    # Where BOM File's Browse... starts, remembered between sessions under its OWN
+    # label in mUtilMenu.cfg - "mBomInitDir", beside mCmpInitDir and separate from
+    # it.  Separate because the two dialogs look in different places: the BOM lives
+    # with the purchasing paperwork, the .DSN with the layout, routinely on
+    # different drives.  One shared anchor meant browsing for a BOM moved where
+    # Schematic Compare would start looking for a design, and vice versa.
+    #
+    # Empty is the default and it is a real value, not a placeholder: there is no
+    # sensible built-in guess for where a BOM lives, so the first Browse of a fresh
+    # install falls back to mCmpInitDir and every one after that starts where the
+    # last one ended.  See BrowseBomFile.
+    variable mBomInitDir ""
+
+    # How many rows of ONE sheet are printed before the dump says "+N more".
+    #
+    # 0 = every row, which is the default and what this step is for: the whole point
+    # of the first cut is to see what is actually in the file.  A 5000-line BOM
+    # through the Command Window is slow rather than dangerous, so the cap is here
+    # to be raised from the Command Window if that ever becomes a nuisance -
+    #
+    #     set ::mUtilMenu::mBomMaxRows 50
+    #
+    # - and not to be a limit nobody asked for.
+    variable mBomMaxRows 0
+
+    # WHERE THE BOM KEEPS WHAT THIS READS.  All three are the template's layout and
+    # not the format's, so they are named here rather than written into the code:
+    # a BOM exported by a different tool puts the same three things in different
+    # places, and moving them should be three assignments in the Command Window
+    # rather than an edit to a proc.
+    #
+    #   mBomFirstRow  the first row that is DATA.  Rows 1-4 are the title block and
+    #                 the column headings, and reading them would put "Part
+    #                 Reference" itself into the reference list.
+    #   mBomRefCol    the designators, as one cell holding a comma-separated list:
+    #                   CP203,CP212,CP701,...,PCAON6,
+    #                 Quoted ("CP203","CP212") is handled too - the quotes come off
+    #                 in BomRefsOf - because the two forms both turn up depending on
+    #                 what wrote the file, and a designator never legitimately has
+    #                 a quote in it.
+    #   mBomDescCol   the description, which is where the package size is buried:
+    #                   MLCC 10UF/16V(0805) X5R 10%
+    variable mBomFirstRow 5
+    variable mBomRefCol   "K"
+    variable mBomDescCol  "E"
+
+    # The package sizes looked for in mBomDescCol, and the whole of what
+    # FOOTPRINT_SIZE can be.  Matched as a SUBSTRING anywhere in the description -
+    # the size is written "(0805)" here, "0805" there and " 0805 " somewhere else,
+    # and there is no one delimiter to anchor on.
+    #
+    # The cost of that is a description carrying one of these four-digit strings for
+    # another reason - a P/N, a quantity - reads as a size.  The alternative is a
+    # per-template pattern for where the size sits, which is a great deal of rope
+    # for a case that has not turned up yet.  A row that matches MORE than one is
+    # reported as "0402/0603" rather than having one of them picked for it: two
+    # sizes in one description is the file being ambiguous, and inventing an answer
+    # would hide exactly the thing the footprint comparison is going to need.
+    #
+    # Order matters only for how a multiple match is written out - the list order is
+    # what "0402/0603" is sorted by.
+    variable mBomSizes [list 0201 0402 0603 0805 1206 1210]
+
+    # KNOWLEDGE_BASE_PCBFOOTPRINT_1 - footprints whose NAME does not carry the size
+    # they actually are.
+    #
+    # rule 2 works by looking for the BOM's size inside the design's PCB Footprint,
+    # which is right for a library that names its parts C0402 / RESC1005X40N_0402 -
+    # and useless for one that does not.  "4r8p" is a 0603 land pattern and says so
+    # nowhere in its name, so every 0603 part drawn with it reads as a mismatch.
+    # This is where that is written down: the footprint on the left is the size on
+    # the right, whatever its name suggests.
+    #
+    #     4r8p       ->  0603
+    #     4r8p_h24   ->  0603
+    #
+    # MATCHED WHOLE AND CASE-INSENSITIVELY.  "4r8p" here means a PCB Footprint that
+    # IS "4r8p" - not one that merely contains it - which is why 4r8p_h24 is a
+    # second entry rather than being covered by the first.  A four-character token
+    # like this one would otherwise turn up inside unrelated footprint names and
+    # quietly excuse a real mismatch, and an exception that fires where it was not
+    # meant to is worse than no exception at all.  Adding a variant is one more
+    # line; that is the trade, and it is the right way round.
+    #
+    # CONSULTED ONLY AFTER THE NORMAL TEST FAILS, so an entry here can turn a
+    # finding into a match and never the other way about.  A footprint that already
+    # carries its size is never looked up.
+    #
+    # A bare global for the same reason SCH_CHECK_ITEM1/2 are: it is meant to be
+    # read and extended from the Command Window with no namespace to spell -
+    #
+    #     lappend ::KNOWLEDGE_BASE_PCBFOOTPRINT_1 {6r0p 0805}
+    #
+    # - and like those, it is re-set by a reload of this file, so an addition that
+    # is meant to last belongs HERE, in the list below, and not only in a session.
+    set ::KNOWLEDGE_BASE_PCBFOOTPRINT_1 [list \
+        [list 4r8p     0603] \
+        [list 4r8p_h24 0603] ]
+
     # AllPagesComp's "(N)(O)BOTH COMP" box, in the page selector's legend row.
     #
     #   1 (default)  every mapped page pair is compared TWICE - once the way it
@@ -1402,9 +1533,20 @@ proc ::mUtilMenu::Trace { pMsg } {
 #=============================================================================
 # Remembered settings
 #
-# One setting so far - mCmpInitDir, the folder the Browse buttons start in.  It is
-# written whenever a Browse changes it, so the dialog reopens where the user was
-# last time, in this session and in the next one.
+# Two settings, and both are FOLDERS a Browse button starts in, written whenever a
+# Browse changes one, so a dialog reopens where the user was last time - in this
+# session and in the next one:
+#
+#   mCmpInitDir   Schematic Compare's Default Folder, for the two .DSN fields
+#   mBomInitDir   BOM Footprint Check's, for the .xlsx field
+#
+# Two labels and not one because the two dialogs look in different places - see
+# RememberBomDir.  Adding a third is a line in SaveConfig, a branch in LoadConfig
+# and a variable; the label IS the variable's name, so there is no mapping to keep
+# in step.
+#
+# NO FILE PATH IS EVER STORED HERE, only folders.  See mBomFile for why the BOM
+# dialog starts empty every session rather than restoring its last file.
 #
 # The format is deliberately not Tcl: one "name value" line, name up to the first
 # space, value the rest of the line verbatim.  A folder is free to contain spaces
@@ -1419,11 +1561,13 @@ proc ::mUtilMenu::Trace { pMsg } {
 proc ::mUtilMenu::SaveConfig { } {
     variable mCfgFile
     variable mCmpInitDir
+    variable mBomInitDir
 
     if { [catch {
         set lFh [open $mCfgFile w]
         puts $lFh "# mUtilMenu remembered settings - safe to delete"
         puts $lFh "mCmpInitDir $mCmpInitDir"
+        puts $lFh "mBomInitDir $mBomInitDir"
         close $lFh
     } lErr] } {
         # Not fatal and not worth a message box: the folder is still remembered for
@@ -1438,6 +1582,7 @@ proc ::mUtilMenu::SaveConfig { } {
 proc ::mUtilMenu::LoadConfig { } {
     variable mCfgFile
     variable mCmpInitDir
+    variable mBomInitDir
 
     if { ![file readable $mCfgFile] } {
         return 0
@@ -1472,28 +1617,55 @@ proc ::mUtilMenu::LoadConfig { } {
                     set mCmpInitDir $lValue
                 }
             }
+            mBomInitDir {
+                # Its OWN label, deliberately - see the variable.  The same
+                # still-there test for the same reason.
+                if { [file isdirectory $lValue] } {
+                    set mBomInitDir $lValue
+                }
+            }
         }
     }
     return 1
 }
 
-# Remember one folder as the new starting point, if it is one.  Called from both
-# Browse paths, which is what makes "wherever I browsed last" stick.
-proc ::mUtilMenu::RememberInitDir { pDir } {
-    variable mCmpInitDir
-
+# Remember one folder in one namespace variable, and write it out.  pVarName is
+# the variable's bare name - "mCmpInitDir", "mBomInitDir" - which is also the
+# label it is stored under, so there is one name for each setting and no mapping
+# table to keep in step.
+proc ::mUtilMenu::RememberDir { pVarName pDir } {
     if { $pDir eq "" || ![file isdirectory $pDir] } {
         return 0
     }
     set lNew [file nativename [file normalize $pDir]]
-    if { $lNew eq $mCmpInitDir } {
+    if { $lNew eq [set ::mUtilMenu::$pVarName] } {
         # Nothing changed - do not rewrite the file for every Browse in the same
         # folder.
         return 1
     }
-    set mCmpInitDir $lNew
+    set ::mUtilMenu::$pVarName $lNew
     ::mUtilMenu::SaveConfig
     return 1
+}
+
+# Remember the Schematic Compare folder.  Called from both of its Browse paths,
+# which is what makes "wherever I browsed last" stick.
+#
+# Kept as a name of its own rather than replaced by RememberDir at the call sites:
+# BrowseInitDir decides whether to clear the two design fields by comparing
+# mCmpInitDir before and after this call, and that reads as what it is only while
+# the call names the setting it is about.
+proc ::mUtilMenu::RememberInitDir { pDir } {
+    return [::mUtilMenu::RememberDir mCmpInitDir $pDir]
+}
+
+# The same for the BOM file's folder.  A SEPARATE setting, under its own label in
+# mUtilMenu.cfg, and that is the point of it: the two dialogs look in different
+# places.  A BOM lives with the purchasing paperwork and the .DSN lives with the
+# layout, often on different drives, and one shared anchor meant that browsing for
+# one moved where the other started looking.
+proc ::mUtilMenu::RememberBomDir { pDir } {
+    return [::mUtilMenu::RememberDir mBomInitDir $pDir]
 }
 
 #=============================================================================
@@ -10550,12 +10722,1618 @@ proc ::mUtilMenu::RunSchematicCheckOnSelection { {pModes {grid}} } {
 }
 
 #=============================================================================
+# BOM Footprint Check
+#
+# Read both sides, compare them, and put the answer in a window that can be copied
+# out of.
+#
+#   the DESIGN side   every page under whatever PROJECT_MANAGER_VIEW has
+#                     selected, and every placed part's Part Reference and PCB
+#                     Footprint.  A single PAGE is refused - see BomCheckScope.
+#   the BOM side      the .xlsx named in the dialog, as below.
+#   the comparison    two rules, BOM -> design, in BomCompareReport.
+#
+# Both dumps go to the Command Window as they are read - they are the evidence -
+# and the REPORT goes to the result window, which is the thing a reader takes
+# away.  The design is read first because it is the side that takes time and the
+# side a refusal can come from.
+#
+#   BOM_Footprint_Check_RULE1   every Part Reference the BOM names must exist in
+#                               the design.  Case is ignored, and the design may
+#                               add ONE placement letter - BOM R21 is found by
+#                               design R21, R21A, R21B, R21C or R21D.  Nothing
+#                               else about the string may differ.
+#   BOM_Footprint_Check_RULE2   where the BOM states a FOOTPRINT_SIZE, the
+#                               design's PCB Footprint must carry that size as a
+#                               substring - "0402" matches "C0402".  Existence is
+#                               decided by rule 1's test, so R21's size is checked
+#                               against every R21x the design placed.  Footprints
+#                               whose name does not carry their size at all get
+#                               their answer from KNOWLEDGE_BASE_PCBFOOTPRINT_1.
+#
+# Each rule says so in as many words when it finds nothing, so a clean report is
+# distinguishable from a rule that never ran.
+#
+# The BOM half prints one line per row, the package size and every Part Reference
+# on that row:
+#
+#     0805    CP203 CP212 CP701 CP702 CP703 CP704 F2C2 F2C3 ... PCAON6
+#     0402    F1C1 F1C2 F1C3
+#     -       PU1
+#
+# from a row that reads
+#
+#     E:  MLCC 10UF/16V(0805) X5R 10%
+#     K:  CP203,CP212,CP701,CP702,CP703,CP704,F2C2,F2C3,...,PCAON6,
+#
+# Step one was DumpXlsxText, which printed every cell of every sheet.  It is still
+# here and still reachable from the Command Window, because it is what answers
+# "which column is which" for a BOM written to a template this has not seen.
+# Step two added the two columns above.  Step three is the design half, which is
+# DumpDesignRefFp and returns its rows for the comparison to come.
+#
+# WHY THE TWO RULES ARE THE TWO RULES.
+#
+#   1  A designator the BOM names and the design does not have is either a part
+#      nobody placed or a BOM written against a different revision.  Both are
+#      worth stopping for, and this is why a BOM row with no package size is still
+#      collected: its designators are as much a part of rule 1 as any other row's.
+#
+#   2  Same designator, different package - a 0402 part sitting in a 0603 land
+#      pattern - is the fault this whole item is named after and the one that
+#      costs a respin.  It can only be asked of a designator that exists, which is
+#      why rule 2 runs on what rule 1 left.
+#
+# WHY THERE IS A ZIP READER IN HERE.  An .xlsx is a ZIP archive of XML parts -
+# that is what the "x" is - and the Tcl that Capture ships has no way to open one:
+#
+#     package require vfs::zip     ->  can't find package vfs::zip
+#     package require tcom         ->  can't find package tcom
+#
+# so neither the usual Tcl route (mount the archive as a filesystem) nor the usual
+# Windows route (drive Excel over COM) is available.  What IS available is
+#
+#     zlib inflate <bytes>
+#
+# built into the Tcl 8.6.5 core Capture loads - checked with [info commands zlib].
+# Raw DEFLATE is the only thing a ZIP entry is compressed with in practice, and
+# the archive's directory is fixed-offset binary, so the whole reader is one
+# central-directory walk and one inflate per part.  That is ZipIndex / ZipExtract
+# below, and they are deliberately general: nothing in them knows about Excel.
+#
+# DRIVING EXCEL WAS THE OTHER OPTION AND IT IS THE WRONG ONE even where tcom
+# exists.  It needs Excel installed on every machine that runs the check, it opens
+# a second application for every file read, and a workbook with a macro or an
+# external link in it stops the whole thing with a modal dialog the user cannot
+# see - behind Capture, on a different window.  Reading the bytes needs nothing
+# installed and cannot be interrupted by something in the file.
+#
+# WHAT IS READ AND WHAT IS NOT.  Cell TEXT, which is what was asked for:
+#
+#   t="s"          shared string - the usual case; the cell holds an index into
+#                  xl/sharedStrings.xml and the string is there
+#   t="inlineStr"  the text is in the cell itself, in <is><t>
+#   t="str"        a formula's cached string result
+#   anything else  the raw <v>, which for a number is the number as written
+#
+# Numbers come out as they are STORED, not as they are displayed: a cell shown as
+# 1.5% holds 0.015, and a date holds a serial number like 45292.  Applying number
+# formats means reading xl/styles.xml and reimplementing Excel's format engine,
+# which is a great deal of work for a step whose job is to show what is in the
+# file.  A BOM's part numbers, descriptions and footprints are text and come out
+# verbatim, which is the part that matters here.
+#
+# EMPTY CELLS ARE DROPPED, not printed as blanks, and the column letter is printed
+# with every value instead - "C=0402" - so a row with a gap in it still says which
+# column each value came from.  A BOM with forty columns would otherwise print
+# thirty-odd empty ones per line and bury the four that are filled in.
+#=============================================================================
+
+# The whole file, as bytes.  -translation binary AND -encoding binary, because
+# either one on its own still lets the other layer touch the data: without the
+# encoding a byte 0x8B is decoded as a character, and without the translation a
+# 0x0D 0x0A pair in the middle of a compressed stream collapses to one byte.
+proc ::mUtilMenu::ReadBinaryFile { pPath } {
+    set lFh [open $pPath r]
+    fconfigure $lFh -translation binary -encoding binary
+    set lData [read $lFh]
+    close $lFh
+    return $lData
+}
+
+# Index a ZIP archive's central directory into pArrName: member name -> the four
+# things needed to get its bytes back,
+#
+#     {localHeaderOffset method compressedSize uncompressedSize}
+#
+# The CENTRAL directory is what is read, and not the local headers, because an
+# entry written with a streaming data descriptor (general-purpose flag bit 3)
+# carries zeroes for both sizes in its local header - the real values are only
+# ever in the central directory.  Excel does not write that form today, but a file
+# that came through a zip tool on the way might.
+#
+# Returns the number of members indexed.
+proc ::mUtilMenu::ZipIndex { pData pArrName } {
+    upvar 1 $pArrName lIdx
+    array unset lIdx
+
+    # The end-of-central-directory record is LAST, and its own length depends on a
+    # trailing comment, so it is found by searching backwards for its signature
+    # rather than by counting from the end.
+    set lEocd [string last "PK\x05\x06" $pData]
+    if { $lEocd < 0 } {
+        error "not a ZIP archive - no end-of-central-directory record"
+    }
+
+    # entries on this disk (2), entries in total (2), directory size (4),
+    # directory offset (4) - 12 bytes from EOCD+8.  su/iu are little-endian
+    # unsigned, which is what ZIP is, everywhere.
+    binary scan [string range $pData [expr { $lEocd + 8 }] [expr { $lEocd + 19 }]] \
+        susuiuiu lHere lTotal lCdSize lCdOff
+    if { ![info exists lTotal] } {
+        error "truncated end-of-central-directory record"
+    }
+    if { $lCdOff == 0xFFFFFFFF || $lTotal == 0xFFFF } {
+        error "ZIP64 archive - not supported by this reader"
+    }
+
+    set lP $lCdOff
+    set lN 0
+    for { set lI 0 } { $lI < $lTotal } { incr lI } {
+        if { [string range $pData $lP [expr { $lP + 3 }]] ne "PK\x01\x02" } {
+            break
+        }
+        binary scan [string range $pData [expr { $lP + 10 }] [expr { $lP + 11 }]] su lMethod
+        binary scan [string range $pData [expr { $lP + 20 }] [expr { $lP + 23 }]] iu lCSize
+        binary scan [string range $pData [expr { $lP + 24 }] [expr { $lP + 27 }]] iu lUSize
+        binary scan [string range $pData [expr { $lP + 28 }] [expr { $lP + 29 }]] su lNameLen
+        binary scan [string range $pData [expr { $lP + 30 }] [expr { $lP + 31 }]] su lExtraLen
+        binary scan [string range $pData [expr { $lP + 32 }] [expr { $lP + 33 }]] su lCmtLen
+        binary scan [string range $pData [expr { $lP + 42 }] [expr { $lP + 45 }]] iu lLocal
+
+        set lName [string range $pData [expr { $lP + 46 }] \
+                                       [expr { $lP + 46 + $lNameLen - 1 }]]
+        set lIdx($lName) [list $lLocal $lMethod $lCSize $lUSize]
+        incr lN
+
+        set lP [expr { $lP + 46 + $lNameLen + $lExtraLen + $lCmtLen }]
+    }
+    return $lN
+}
+
+# One member's bytes, given what ZipIndex recorded for it.
+#
+# The local header has to be read even though the sizes come from the directory:
+# its filename and extra fields are what say where the data starts, and the extra
+# field is routinely a different LENGTH there than in the central directory - the
+# local one carries alignment padding the directory copy does not.  Taking the
+# directory's length would land in the middle of the compressed stream.
+proc ::mUtilMenu::ZipExtract { pData pEntry } {
+    foreach { lLocal lMethod lCSize lUSize } $pEntry { break }
+
+    if { [string range $pData $lLocal [expr { $lLocal + 3 }]] ne "PK\x03\x04" } {
+        error "bad local header at offset $lLocal"
+    }
+    binary scan [string range $pData [expr { $lLocal + 26 }] [expr { $lLocal + 27 }]] su lNameLen
+    binary scan [string range $pData [expr { $lLocal + 28 }] [expr { $lLocal + 29 }]] su lExtraLen
+
+    set lStart [expr { $lLocal + 30 + $lNameLen + $lExtraLen }]
+    set lRaw   [string range $pData $lStart [expr { $lStart + $lCSize - 1 }]]
+
+    switch -- $lMethod {
+        0 { return $lRaw }
+        8 {
+            # Raw DEFLATE - no zlib header, no gzip wrapper.  "zlib inflate" is the
+            # raw form; "zlib decompress" would expect the two-byte zlib header a
+            # ZIP entry does not have.
+            return [zlib inflate $lRaw]
+        }
+        default {
+            error "unsupported ZIP compression method $lMethod"
+        }
+    }
+}
+
+# One XML part of the archive, as TEXT.  The parts of an .xlsx are UTF-8 - the
+# format says so and Excel writes nothing else - so the bytes are decoded once
+# here and everything above this line works in characters.
+proc ::mUtilMenu::ZipXmlPart { pData pArrName pName } {
+    upvar 1 $pArrName lIdx
+
+    if { ![info exists lIdx($pName)] } {
+        return ""
+    }
+    return [encoding convertfrom utf-8 [::mUtilMenu::ZipExtract $pData $lIdx($pName)]]
+}
+
+# XML text back to plain text.
+#
+# The five predefined entities plus numeric character references, which is the
+# whole of what Excel writes.  &amp; is last in the string map and that is not an
+# accident - string map scans the input once and takes the first key that matches
+# at each position, so an already-decoded "&" from an earlier replacement can
+# never be re-read as the start of another entity.
+proc ::mUtilMenu::XmlUnescape { pText } {
+    if { [string first "&" $pText] < 0 } {
+        return $pText
+    }
+    set lT $pText
+
+    # Numeric references first, one form at a time.  string map replaces every
+    # occurrence of the reference it just decoded, so the loop shortens the text on
+    # every pass and cannot spin.
+    while { [regexp {&#(x?)([0-9a-fA-F]+);} $lT lAll lHex lNum] } {
+        if { [catch {
+            set lCode [expr { $lHex eq "" ? [scan $lNum %d] : [scan $lNum %x] }]
+            set lChar [format %c $lCode]
+        }] } {
+            set lChar ""
+        }
+        set lT [string map [list $lAll $lChar] $lT]
+    }
+
+    return [string map { &lt; < &gt; > &quot; \" &apos; ' &amp; & } $lT]
+}
+
+# EVERY NON-GREEDY PATTERN IN THIS SECTION WRITES ITS ATTRIBUTE SCAN AS [^>]*?
+# AND NOT [^>]*, AND THAT IS NOT A STYLE CHOICE.  Tcl's regexp engine is not Perl's:
+# re_syntax(n) says a branch's greediness is decided by the FIRST quantifier in it
+# that has a preference, and every later quantifier is dragged along with it.  So
+#
+#     <si[^>]*>.*?</si>            the [^>]* is greedy, so the .*? is greedy TOO
+#
+# and that pattern does not match one <si> - it matches from the first <si> to the
+# LAST </si> in the file.  It does not error and it does not return nothing: it
+# returns ONE match containing the whole table, so a 94-string sharedStrings.xml
+# reads back as 1 string and every cell in the workbook then indexes past the end
+# of it and comes out empty.  That is exactly what happened, and the symptom -
+# "0 rows with content" on a workbook that plainly has content - points nowhere
+# near the cause.
+#
+# [^>]*? cannot match a ">" whether it is greedy or not, so making it non-greedy
+# changes nothing about what it matches and everything about what follows it.
+#
+# AND NOTHING BELOW USES "|" AT THE TOP LEVEL OF A PATTERN, which is the same trap
+# one step further on: re_syntax(n) says an RE of two or more branches joined by
+# "|" prefers the LONGEST match outright, and no amount of *? inside the branches
+# overrides it.  This
+#
+#     <t[^>]*?/>|<t[^>]*?>(.*?)</t>          both branches non-greedy, still wrong
+#
+# was written to handle the empty <t/> alongside the normal one, and it read a
+# rich-text cell as
+#
+#     X370 Extreme4</t></r><r><rPr><b/>...</rPr><t xml:space="preserve">(Cancelled)
+#
+# - one match reaching past the first </t> to the last one, markup and all.  Where
+# two shapes have to be handled, the odd one is REMOVED with its own regsub first
+# and the pattern that is left has one branch.
+
+# Every <t> inside one chunk of XML, concatenated and unescaped.
+#
+# A shared string is not one <t>: rich text splits it into a <r> run per format
+# change, so "100nF 0402" with the 0402 in bold is two runs and two <t>s, and the
+# string is the two of them joined.  Phonetic guides (<rPh>) are stripped first -
+# they are a SECOND reading of the same characters, not more text, and joining
+# them in would double every word of a Japanese BOM.
+proc ::mUtilMenu::XmlTextOf { pXml } {
+    set lXml $pXml
+    regsub -all {<rPh[^>]*?>.*?</rPh>} $lXml "" lXml
+    regsub -all {<rPh[^>]*/>}          $lXml "" lXml
+
+    # The empty forms go first and separately - see the note above on "|".  They
+    # hold no text, so removing them loses nothing, and what is left is one shape.
+    regsub -all {<t/>}          $lXml "" lXml
+    regsub -all {<t\s[^>]*/>}   $lXml "" lXml
+
+    set lTxt ""
+    foreach { lAll lInner } [regexp -all -inline {<t[^>]*?>(.*?)</t>} $lXml] {
+        append lTxt $lInner
+    }
+    return [::mUtilMenu::XmlUnescape $lTxt]
+}
+
+# xl/sharedStrings.xml -> pArrName(index) = text, indexed from 0.
+#
+# An array and not a list, and the cells look strings up through it by index,
+# because this is the one table every text cell in the workbook goes through: a
+# 30-column BOM of 500 rows is 15000 lookups, and an array is a hash where a list
+# would be walked.
+#
+# Returns how many strings were read.
+proc ::mUtilMenu::XlsxSharedStrings { pXml pArrName } {
+    upvar 1 $pArrName lStr
+    array unset lStr
+
+    set lN 0
+    foreach lSi [regexp -all -inline {<si[^>]*?>.*?</si>} $pXml] {
+        set lStr($lN) [::mUtilMenu::XmlTextOf $lSi]
+        incr lN
+    }
+    return $lN
+}
+
+# One cell's text, on one line.
+#
+# A cell really can hold a line break - Alt+Enter, and a BOM's description column
+# is full of them - and one row is one line here, so a raw newline would split the
+# row across the Command Window and the column letters would stop lining up with
+# anything.  The break is shown as \n rather than replaced with a space so the dump
+# still says it was there.  The VALUE is untouched; this is a printing decision
+# and it stays in the printing.
+proc ::mUtilMenu::FlattenCell { pText } {
+    return [string map [list "\r\n" {\n} "\n" {\n} "\r" {\n} "\t" {\t}] $pText]
+}
+
+# The column letters out of a cell reference: "AB12" -> "AB".
+proc ::mUtilMenu::XlsxCellCol { pRef } {
+    set lCol ""
+    regexp {^([A-Za-z]+)} $pRef lAll lCol
+    return [string toupper $lCol]
+}
+
+# One cell's text, from its t= attribute and its body.  See the section header for
+# which types are handled and what happens to numbers.
+proc ::mUtilMenu::XlsxCellValue { pType pBody pArrName } {
+    upvar 1 $pArrName lStr
+
+    switch -- $pType {
+        s {
+            set lV ""
+            if { ![regexp {<v[^>]*?>(.*?)</v>} $pBody lAll lV] } {
+                return ""
+            }
+            # An index that is not a number, or points past the end of the table, is
+            # a broken file rather than an empty cell - but there is nothing useful
+            # to print for it either, so it reads as empty and the row still prints.
+            if { ![string is integer -strict $lV] || ![info exists lStr($lV)] } {
+                return ""
+            }
+            return $lStr($lV)
+        }
+        inlineStr {
+            return [::mUtilMenu::XmlTextOf $pBody]
+        }
+        default {
+            # str (a formula's cached string), b, e, d, and the no-t= numeric case.
+            set lV ""
+            if { ![regexp {<v[^>]*?>(.*?)</v>} $pBody lAll lV] } {
+                return ""
+            }
+            return [::mUtilMenu::XmlUnescape $lV]
+        }
+    }
+}
+
+# One worksheet part -> a list of {rowNumber {{col value} {col value} ...}}, rows
+# with nothing in them left out entirely.
+#
+# SELF-CLOSING TAGS ARE REMOVED BEFORE ANYTHING IS MATCHED, and that is what makes
+# the rest of this safe.  Excel writes <row r="7" spans="1:4"/> for a row that is
+# styled but empty and <c r="D7" s="3"/> for a cell that is formatted but empty,
+# and a <row ...>(.*?)</row> pattern run against one of those would sail straight
+# past it and swallow the NEXT row's </row> - two real rows silently merged into
+# one.  Neither form carries a value, so dropping them first costs nothing and the
+# pattern below then only ever sees tags that really do have a closing partner.
+proc ::mUtilMenu::XlsxSheetRows { pXml pArrName } {
+    upvar 1 $pArrName lStr
+
+    # Only <sheetData> is the rows.  Everything before it - <cols>, <sheetViews>,
+    # <dimension> - and everything after it - <mergeCells>, <hyperlinks> - is page
+    # setup, and narrowing to it first is also what keeps "<c" from having to be
+    # told apart from the <col> elements of <cols>, which it otherwise would.
+    set lXml ""
+    if { ![regexp {<sheetData[^>]*>(.*)</sheetData>} $pXml lAll lXml] } {
+        return [list]
+    }
+
+    regsub -all {<row[^>]*/>} $lXml "" lXml
+    regsub -all {<c[^>]*/>}   $lXml "" lXml
+
+    set lRows [list]
+    foreach { lAll lAttr lBody } [regexp -all -inline {<row([^>]*?)>(.*?)</row>} $lXml] {
+        set lR ""
+        regexp {\sr="([^"]*)"} $lAttr lA lR
+
+        set lCells [list]
+        foreach { lCAll lCAttr lCBody } [regexp -all -inline {<c([^>]*?)>(.*?)</c>} $lBody] {
+            set lRef  ""
+            set lType ""
+            regexp {\sr="([^"]*)"} $lCAttr lA lRef
+            regexp {\st="([^"]*)"} $lCAttr lA lType
+
+            set lVal [::mUtilMenu::XlsxCellValue $lType $lCBody lStr]
+            if { $lVal eq "" } {
+                continue
+            }
+            lappend lCells [list [::mUtilMenu::XlsxCellCol $lRef] $lVal]
+        }
+
+        if { [llength $lCells] } {
+            lappend lRows [list $lR $lCells]
+        }
+    }
+    return $lRows
+}
+
+# The workbook's sheets, in tab order, as {sheetName zipMemberName} pairs.
+#
+# It takes two parts to answer that.  xl/workbook.xml names the sheets and gives
+# each an r:id; xl/_rels/workbook.xml.rels turns an r:id into the part that holds
+# it.  The file names are NOT reliable on their own - a workbook whose first tab
+# was deleted and recreated can have tab 1 living in sheet3.xml - so the
+# relationship is followed rather than assumed.
+#
+# Attributes are picked out of each tag one at a time instead of with a single
+# pattern over the whole tag, because attribute ORDER is not fixed by the format
+# and a pattern that spelled out Id-then-Target would quietly find nothing on a
+# file written by anything but Excel.
+proc ::mUtilMenu::XlsxSheetList { pWorkbook pRels } {
+    array set lRel {}
+    foreach lTag [regexp -all -inline {<Relationship[^>]*>} $pRels] {
+        set lId  ""
+        set lTgt ""
+        regexp {Id="([^"]*)"}     $lTag lA lId
+        regexp {Target="([^"]*)"} $lTag lA lTgt
+        if { $lId ne "" } {
+            set lRel($lId) $lTgt
+        }
+    }
+
+    set lOut [list]
+    # <sheet\s...> and not <sheet[^>]*>: the latter also matches the <sheets>
+    # container the sheet tags live inside.
+    foreach lTag [regexp -all -inline {<sheet\s[^>]*>} $pWorkbook] {
+        set lName ""
+        set lRid  ""
+        regexp {name="([^"]*)"}  $lTag lA lName
+        regexp {r:id="([^"]*)"}  $lTag lA lRid
+        if { $lRid eq "" } {
+            regexp {relationshipId="([^"]*)"} $lTag lA lRid
+        }
+        if { $lRid eq "" || ![info exists lRel($lRid)] } {
+            continue
+        }
+
+        # A target is relative to the part that referenced it - xl/workbook.xml -
+        # so "worksheets/sheet1.xml" is xl/worksheets/sheet1.xml.  An absolute one
+        # starts at the package root and only needs its leading slash taken off.
+        set lTgt $lRel($lRid)
+        if { [string index $lTgt 0] eq "/" } {
+            set lPart [string range $lTgt 1 end]
+        } else {
+            set lPart "xl/$lTgt"
+        }
+        lappend lOut [list [::mUtilMenu::XmlUnescape $lName] $lPart]
+    }
+    return $lOut
+}
+
+# One row's cell in one column, by column LETTER, or "" when the row has nothing
+# there.  XlsxSheetRows drops empty cells rather than padding the row out to a
+# fixed width - see the note on it - so a row is a short list of {col value} and
+# not something that can be indexed by position.
+proc ::mUtilMenu::RowCell { pCells pCol } {
+    set lWant [string toupper $pCol]
+    foreach lCell $pCells {
+        if { [lindex $lCell 0] eq $lWant } {
+            return [lindex $lCell 1]
+        }
+    }
+    return ""
+}
+
+# The package size(s) written into a description, as "0805" - or "0402/0603" when
+# the description names more than one, and "" when it names none.  See mBomSizes.
+proc ::mUtilMenu::BomSizeOf { pText } {
+    variable mBomSizes
+
+    set lHits [list]
+    foreach lSize $mBomSizes {
+        if { [string first $lSize $pText] >= 0 } {
+            lappend lHits $lSize
+        }
+    }
+    return [join $lHits "/"]
+}
+
+# One BOM cell of designators -> a list of them.
+#
+#     CP203,CP212,CP701,...,PCAON6,     ->   CP203 CP212 CP701 ... PCAON6
+#     "CP203","CP212"                   ->   CP203 CP212
+#
+# The TRAILING COMMA in the first form is why the empty pieces are dropped rather
+# than trusted: splitting "A,B," on "," gives three pieces and the third is empty,
+# and an empty designator would go on to be looked up in the design and reported
+# missing from it - a fault invented by the reader out of a comma.
+#
+# The same drop covers ",," in the middle and a cell that is nothing but commas,
+# and it is why this returns a LIST rather than a count: how many designators a
+# row really has is a question only worth answering after the empties are gone.
+proc ::mUtilMenu::BomRefsOf { pText } {
+    set lOut [list]
+    foreach lRef [split $pText ","] {
+        # Quotes first, then whitespace: "CP203" quoted AND padded - which is what
+        # a cell edited by hand turns into - is  "CP203"  with the spaces outside
+        # the quotes on one side and inside on the other, and one trim in each
+        # order would leave one of them on.
+        set lRef [string trim $lRef]
+        set lRef [string trim $lRef "\""]
+        set lRef [string trim $lRef]
+        if { $lRef eq "" } {
+            continue
+        }
+        lappend lOut $lRef
+    }
+    return $lOut
+}
+
+#-----------------------------------------------------------------------------
+# The DESIGN side - every page's Part Reference and PCB Footprint
+#-----------------------------------------------------------------------------
+
+# One page's placed parts, as {reference footprint} pairs.
+#
+# NOT CollectPageParts, deliberately, and the difference is the whole point of
+# having this.  CollectPageParts reads eleven things per part and walks every pin
+# of every one of them - its own timing note puts a 312-part page at 1843 ms - and
+# the two checks this feeds need exactly two properties and no pins at all.  Over
+# a hundred-page design that is the difference between a few seconds and a coffee.
+#
+# Drawn instances are skipped for the same reason CollectPageParts skips them:
+# they are hierarchical blocks, and a block has no Part Reference to report.
+proc ::mUtilMenu::CollectPageRefFp { pPage } {
+    set lStatus  [DboState]
+    set lNullObj NULL
+    set lRows    [list]
+
+    catch {
+        set lIter [$pPage NewPartInstsIter $lStatus]
+        set lInst [$lIter NextPartInst $lStatus]
+        while { $lInst != $lNullObj } {
+            if { [$lInst GetObjectType] == $::DboBaseObject_PLACED_INSTANCE } {
+                set lPart [DboPartInstToDboPlacedInst $lInst]
+                lappend lRows [list \
+                    [::mUtilMenu::PropStr $lPart "Part Reference"] \
+                    [::mUtilMenu::PropStr $lPart "PCB Footprint"]]
+            }
+            set lInst [$lIter NextPartInst $lStatus]
+        }
+        catch { delete_DboPagePartInstsIter $lIter }
+    }
+    catch { $lStatus -delete }
+    return $lRows
+}
+
+# Print every page's parts under one scope, and RETURN what was collected as
+# {reference footprint schematicName pageName} rows.
+#
+# The return value is not used yet and is not decoration: it is the design half of
+# both checks in the section header, and collecting it is the expensive part.
+# Handing it back means the step that compares it against the BOM is a function of
+# two lists this file already has, rather than a second walk of the design.
+#
+# Sorted by reference within a page, dictionary order, so R2 comes before R10 and
+# a human can find a designator by eye.  The page order itself is left as the
+# design gives it - that is the order the Project Manager shows, and renumbering
+# it here would only make the report disagree with the tree beside it.
+proc ::mUtilMenu::DumpDesignRefFp { pPairs pScope } {
+    ::mUtilMenu::Out "================================================================"
+    ::mUtilMenu::Out [::mUtilMenu::Banner "BOM Footprint Check - design side"]
+    ::mUtilMenu::Out "================================================================"
+    ::mUtilMenu::Out [format "  %-16s %s" "scope" $pScope]
+    ::mUtilMenu::Out [format "  %-16s %s" "pages" [llength $pPairs]]
+
+    set lAll [list]
+    array set lSeen {}
+    set lNoFp 0
+
+    foreach lPair $pPairs {
+        set lSch  [lindex $lPair 0]
+        set lPage [lindex $lPair 1]
+
+        set lSchName ""
+        set lPageName ""
+        catch { set lSchName  [::mUtilMenu::CStr $lSch  GetName] }
+        catch { set lPageName [::mUtilMenu::CStr $lPage GetName] }
+
+        ::mUtilMenu::Out ""
+        ::mUtilMenu::Out "---- [::mUtilMenu::OrDash $lSchName] / [::mUtilMenu::OrDash $lPageName] ----"
+
+        set lRows [::mUtilMenu::CollectPageRefFp $lPage]
+        foreach lRow [lsort -dictionary -index 0 $lRows] {
+            set lRef [lindex $lRow 0]
+            set lFp  [lindex $lRow 1]
+
+            # A part with no PCB Footprint is listed under "-" rather than left
+            # out.  It is not a nothing: the footprint is the property check 2 is
+            # going to compare, and a part that has none cannot be size-matched at
+            # all - which is a finding, not an absence of one.
+            if { $lFp eq "" } {
+                incr lNoFp
+            }
+            if { $lRef ne "" } {
+                set lSeen($lRef) 1
+            }
+
+            ::mUtilMenu::Out [format "  %-16s %s" \
+                [::mUtilMenu::OrDash $lRef] [::mUtilMenu::OrDash $lFp]]
+            lappend lAll [list $lRef $lFp $lSchName $lPageName]
+        }
+        ::mUtilMenu::Out "  -> [llength $lRows] part(s)"
+    }
+
+    ::mUtilMenu::Out ""
+    ::mUtilMenu::Out "  -> [llength $lAll] part(s) over [llength $pPairs] page(s), [array size lSeen] distinct Part Reference(s), $lNoFp with no PCB Footprint"
+
+    # Two counts that differ means one designator is placed more than once.  Said
+    # plainly rather than left for the reader to subtract, because it changes what
+    # the BOM comparison means - a reference the BOM names once and the design
+    # places twice matches, and is still wrong.
+    if { [llength $lAll] != [array size lSeen] } {
+        ::mUtilMenu::Out "  -> NOTE: [expr { [llength $lAll] - [array size lSeen] }] part(s) share a Part Reference with another part"
+    }
+    return $lAll
+}
+
+# What the Project Manager has selected, as {kind scopeLabel pairs}, or a 1-element
+# {""} when it is not something this item can run on.
+#
+# WHY A PAGE IS REFUSED.  A BOM is the parts list for the WHOLE board, so every
+# designator in it has to be looked for across the whole design.  Checking it
+# against one page would report every part on the other forty pages as missing -
+# hundreds of findings, all of them wrong, and the handful of real ones buried
+# among them.  There is no useful answer to give for a page, so it is refused
+# outright rather than answered badly.
+#
+# A schematic, the .DSN and the .OPJ all resolve to "every page under this", which
+# is a scope the question means something in, so all three are accepted.
+#
+# This repeats about thirty lines of RunSchematicCheckOnSelection rather than
+# sharing them, and that is on purpose: that proc is the working scope resolution
+# for two shipped checks, it carries a diagnostics block those checks' users are
+# told to paste back, and the narrowest-wins rule in it is the thing that makes
+# clicking a page inside a selected design mean the page.  Refactoring it to serve
+# a third caller that wants the OPPOSITE answer for a page would put all of that
+# at risk to save thirty lines.
+proc ::mUtilMenu::BomCheckScope { } {
+    set lItems [list]
+    set lAsked 1
+    if { [catch { set lItems [GetSelectedPMItems] } lErr] } {
+        set lAsked 0
+        ::mUtilMenu::Trace "GetSelectedPMItems failed -> $lErr"
+    }
+
+    set lOpj ""
+    catch { set lOpj [GetActiveOpjName] }
+
+    set lInfo    [::mUtilMenu::ActivePMDesignInfo]
+    set lDsn     [lindex $lInfo 0]
+    set lDsnRoot [lindex $lInfo 1]
+
+    set lHits [list]
+    foreach lLabel $lItems {
+        set lCls  [::mUtilMenu::ClassifyPMItem $lLabel $lDsn $lDsnRoot $lOpj]
+        set lKind [lindex $lCls 0]
+        if { $lKind ne "other" } {
+            lappend lHits [list $lKind $lLabel [lindex $lCls 1]]
+        }
+    }
+
+    if { [llength $lHits] == 0 } {
+        if { !$lAsked } {
+            set lMsg "Could not read the Project Manager selection.\n\nIs a project open, and is PROJECT_MANAGER_VIEW the active window?"
+        } elseif { [llength $lItems] == 0 } {
+            set lMsg "Nothing is selected in the Project Manager.\n\nClick a schematic, the Design (.DSN) or the Project (.OPJ) and try again."
+        } else {
+            set lMsg "The Project Manager selection is not a schematic, a Design or a Project.\n\nSelected:  [join $lItems {, }]"
+        }
+        ::mUtilMenu::Out "BOM Footprint Check - nothing usable selected in the Project Manager"
+        catch { capDisplayMessageBox $lMsg "BOM Footprint Check" }
+        return [list ""]
+    }
+
+    # Narrowest wins - but only among the scopes this check can ACTUALLY RUN ON,
+    # and that is the one place this deliberately parts company with
+    # RunSchematicCheckOnSelection.  There, every kind is a valid answer, so the
+    # narrowest of them is the one the user meant.  Here a page is not an answer
+    # at all, and letting it win would mean a selection of "this schematic AND a
+    # page inside it" gets refused on account of the page while a perfectly good
+    # schematic sits in the same list.  So a page only ever decides the outcome
+    # when there is nothing else - which is the case the refusal is about, and the
+    # only one the Project Manager produces on a plain click anyway.
+    set lPick ""
+    foreach lKind { schematic design project } {
+        foreach lHit $lHits {
+            if { [lindex $lHit 0] eq $lKind } {
+                set lPick $lHit
+                break
+            }
+        }
+        if { $lPick ne "" } {
+            break
+        }
+    }
+
+    if { $lPick eq "" } {
+        set lMsg "A PAGE is selected in the Project Manager.\n\nBOM Footprint Check needs the whole design: a BOM lists the\nparts of the whole board, and checking it against one page\nwould report every part on the other pages as missing.\n\nClick the schematic, the Design (.DSN) or the Project (.OPJ)\nand try again."
+        ::mUtilMenu::Out "BOM Footprint Check - a PAGE is selected; this check needs a schematic, a Design or a Project"
+        catch { capDisplayMessageBox $lMsg "BOM Footprint Check" }
+        return [list ""]
+    }
+
+    set lKind  [lindex $lPick 0]
+    set lLabel [lindex $lPick 1]
+    set lWhat  [lindex $lPick 2]
+
+    # What to call the scope in the report - a SWIG handle is no use to a reader.
+    set lScope "[string totitle $lKind] [::mUtilMenu::OrDash $lLabel]"
+    if { [::mUtilMenu::PMItemDboClass $lLabel] ne "" } {
+        switch -- $lKind {
+            design {
+                set lPath [::mUtilMenu::DesignPathOf $lWhat]
+                if { $lPath ne "" } {
+                    set lScope "Design [file tail $lPath]"
+                }
+            }
+            schematic {
+                if { [::mUtilMenu::BindDboHandle $lWhat DboSchematic] } {
+                    set lScope "Schematic [::mUtilMenu::CStr $lWhat GetName]"
+                }
+            }
+        }
+    } elseif { $lKind eq "design" || $lKind eq "project" } {
+        set lScope "[string totitle $lKind] [file tail $lWhat]"
+    }
+
+    set lPairs [::mUtilMenu::PagesForPMItem $lKind $lWhat $lDsn]
+    if { [llength $lPairs] == 0 } {
+        set lMsg "$lScope\n\nNo pages could be read under it."
+        if { $lKind eq "project" && $lDsn eq "" } {
+            append lMsg "\n\nA .OPJ names no design of its own, so the design the\nProject Manager has open is the one that would be used -\nand it did not report one.  Click the .DSN instead."
+        }
+        ::mUtilMenu::Out "BOM Footprint Check - $lScope: no pages could be read"
+        catch { capDisplayMessageBox $lMsg "BOM Footprint Check" }
+        return [list ""]
+    }
+
+    return [list $lKind $lScope $lPairs]
+}
+
+#-----------------------------------------------------------------------------
+# The BOM side
+#-----------------------------------------------------------------------------
+
+# WHAT THE MENU ITEM PRINTS: one line per BOM row, the package size then every
+# designator on that row.
+#
+#     0805    CP203 CP212 CP701 CP702 ... PCAON6
+#     0402    F1C1 F1C2 F1C3
+#     -       PU1
+#
+# which is mBomDescCol and mBomRefCol of that row and nothing else.  The rest of
+# the workbook is still read - it has to be, the sheet is one XML part - it is
+# just not printed; DumpXlsxText is what prints all of it, and it is still here
+# for exactly that (see the note on it).
+#
+# ROWS WITH NO SIZE ARE STILL PRINTED, under a "-".  "If there is no size do not
+# show it" is about the FIELD and not the row: the designators on such a row are
+# as real as any other, and they are half of what this is being built for - every
+# Part Reference in the BOM has to exist in the design, size or no size.  Dropping
+# the row would quietly shrink the list that check runs on.  The size column is
+# left-aligned to a fixed width so the designators start in the same place whether
+# there is a size or not.
+#
+# ROWS WITH NO DESIGNATORS ARE DROPPED, on the other hand, and that is not the
+# same decision: a BOM row with an empty mBomRefCol is a heading, a spacer or a
+# note, and it has nothing to say to either of the checks coming.
+#
+# RETURNS one record per Part Reference - {reference size sheetName rowNumber} -
+# which is the BOM half of the comparison, the same way DumpDesignRefFp returns the
+# design half.  One record per REFERENCE and not per row: both rules ask their
+# question about a single designator, and flattening here means neither of them
+# has to know that the file stores twenty of them in one cell.
+#
+# A bare call from the Command Window will echo that list.  Assign it if you only
+# want the printout:
+#
+#     set lBom [::mUtilMenu::DumpBomFootprint {G:/path/bom.xlsx}]
+#
+# Errors are NOT caught here.  The caller puts up a message box with whatever went
+# wrong, and a half-read workbook that printed two sheets and then said why it
+# stopped is more use than one that printed nothing.
+proc ::mUtilMenu::DumpBomFootprint { pPath } {
+    variable mBomMaxRows
+    variable mBomFirstRow
+    variable mBomRefCol
+    variable mBomDescCol
+
+    set lData [::mUtilMenu::ReadBinaryFile $pPath]
+    set lN    [::mUtilMenu::ZipIndex $lData lZip]
+
+    ::mUtilMenu::Out "================================================================"
+    ::mUtilMenu::Out [::mUtilMenu::Banner "BOM Footprint Check - [file tail $pPath]"]
+    ::mUtilMenu::Out "================================================================"
+    ::mUtilMenu::Out [format "  %-16s %s" "file"           [file nativename $pPath]]
+    ::mUtilMenu::Out [format "  %-16s %s" "size"           "[string length $lData] byte(s)"]
+    ::mUtilMenu::Out [format "  %-16s %s" "first data row" $mBomFirstRow]
+    ::mUtilMenu::Out [format "  %-16s %s" "FOOTPRINT_SIZE" "column $mBomDescCol"]
+    ::mUtilMenu::Out [format "  %-16s %s" "Part Reference" "column $mBomRefCol"]
+
+    if { ![info exists lZip(xl/workbook.xml)] } {
+        error "xl/workbook.xml is missing - this is not an .xlsx workbook\n(an .xls or .xlsm saved under the wrong name will do this)"
+    }
+
+    array set lStr {}
+    set lSsXml [::mUtilMenu::ZipXmlPart $lData lZip "xl/sharedStrings.xml"]
+    if { $lSsXml ne "" } {
+        ::mUtilMenu::XlsxSharedStrings $lSsXml lStr
+    }
+
+    set lSheets [::mUtilMenu::XlsxSheetList \
+        [::mUtilMenu::ZipXmlPart $lData lZip "xl/workbook.xml"] \
+        [::mUtilMenu::ZipXmlPart $lData lZip "xl/_rels/workbook.xml.rels"]]
+
+    # EVERY sheet is walked, and not just the first, because which tab the BOM is
+    # on is not something this can know - a workbook with the BOM on tab 2 and a
+    # cover sheet on tab 1 is ordinary.  It costs nothing to be wrong about it:
+    # rows are only printed when mBomRefCol holds something, so a cover sheet, a
+    # revision log or an empty tab contributes no lines and says so in its total.
+    set lRowTot  0
+    set lRefTot  0
+    set lSizeTot 0
+    set lSheetN  0
+    set lRecs    [list]
+
+    foreach lSheet $lSheets {
+        incr lSheetN
+        set lName [lindex $lSheet 0]
+        set lPart [lindex $lSheet 1]
+
+        ::mUtilMenu::Out ""
+        ::mUtilMenu::Out "---- sheet $lSheetN/[llength $lSheets]  \"$lName\" ----"
+
+        if { ![info exists lZip($lPart)] } {
+            ::mUtilMenu::Out "  (missing from the archive)"
+            continue
+        }
+
+        set lRows [::mUtilMenu::XlsxSheetRows \
+            [::mUtilMenu::ZipXmlPart $lData lZip $lPart] lStr]
+
+        set lShown 0
+        set lHere  0
+        set lLeft  0
+        foreach lRow $lRows {
+            set lR     [lindex $lRow 0]
+            set lCells [lindex $lRow 1]
+
+            # Above mBomFirstRow is the title block and the column headings.  A row
+            # whose r= attribute did not come through is skipped with them rather
+            # than guessed at - there is no way to tell which side of the heading
+            # an unnumbered row falls on.
+            if { ![string is integer -strict $lR] || $lR < $mBomFirstRow } {
+                continue
+            }
+
+            set lRefs [::mUtilMenu::BomRefsOf [::mUtilMenu::RowCell $lCells $mBomRefCol]]
+            if { ![llength $lRefs] } {
+                continue
+            }
+
+            incr lHere
+            incr lRefTot [llength $lRefs]
+
+            set lSize [::mUtilMenu::BomSizeOf [::mUtilMenu::RowCell $lCells $mBomDescCol]]
+            if { $lSize ne "" } {
+                incr lSizeTot
+            }
+
+            # Recorded whether or not the line below is printed - mBomMaxRows caps
+            # what is SHOWN, and a cap on the printout must not quietly shrink what
+            # is checked.
+            foreach lRef $lRefs {
+                lappend lRecs [list $lRef $lSize $lName $lR]
+            }
+
+            if { $mBomMaxRows > 0 && $lShown >= $mBomMaxRows } {
+                incr lLeft
+                continue
+            }
+            incr lShown
+            # Wide enough for "0402/0603" and a space.  A row that somehow named
+            # three sizes would push its own designators out of line and no
+            # other row's - format pads, it does not truncate, and losing a size
+            # to keep a column straight would be the wrong trade.
+            ::mUtilMenu::Out [format "  %-10s %s" \
+                [::mUtilMenu::OrDash $lSize] [join $lRefs " "]]
+        }
+
+        if { $lLeft > 0 } {
+            ::mUtilMenu::Out "  ... +$lLeft more row(s) - raise ::mUtilMenu::mBomMaxRows to see them"
+        }
+        ::mUtilMenu::Out "  -> $lHere row(s) with Part References"
+        incr lRowTot $lHere
+    }
+
+    ::mUtilMenu::Out ""
+    ::mUtilMenu::Out "  -> $lRowTot row(s), $lRefTot part reference(s), $lSizeTot row(s) with a FOOTPRINT_SIZE"
+    if { $lRowTot == 0 } {
+        ::mUtilMenu::Out "  -> nothing found.  Check mBomFirstRow ($mBomFirstRow) and mBomRefCol ($mBomRefCol)"
+        ::mUtilMenu::Out "     against the file - ::mUtilMenu::DumpXlsxText {$pPath} prints every cell."
+    }
+    return $lRecs
+}
+
+# Print everything an .xlsx has to say, sheet by sheet, to the Command Window.
+#
+# NOT what the menu item runs any more - DumpBomFootprint is - and kept because
+# it is the tool for the job the menu item cannot do: working out where a BOM
+# written to a different template keeps its columns.  Run it from the Command
+# Window, read off which letters hold the description and the designators, and set
+# mBomDescCol / mBomRefCol / mBomFirstRow to match.
+#
+#     ::mUtilMenu::DumpXlsxText {G:/path/board_bom.xlsx}
+#
+# Errors are NOT caught here, for the same reason they are not in DumpBomFootprint.
+proc ::mUtilMenu::DumpXlsxText { pPath } {
+    variable mBomMaxRows
+
+    set lData [::mUtilMenu::ReadBinaryFile $pPath]
+    set lN    [::mUtilMenu::ZipIndex $lData lZip]
+
+    ::mUtilMenu::Out "================================================================"
+    ::mUtilMenu::Out [::mUtilMenu::Banner "BOM Footprint Check - [file tail $pPath]"]
+    ::mUtilMenu::Out "================================================================"
+    ::mUtilMenu::Out [format "  %-14s %s" "file"    [file nativename $pPath]]
+    ::mUtilMenu::Out [format "  %-14s %s" "size"    "[string length $lData] byte(s)"]
+    ::mUtilMenu::Out [format "  %-14s %s" "members" "$lN part(s) in the archive"]
+
+    # No workbook part means this is a ZIP but not a spreadsheet - an .xls renamed
+    # to .xlsx is the usual way that happens, and it is worth saying so plainly
+    # rather than reporting "0 sheets".
+    if { ![info exists lZip(xl/workbook.xml)] } {
+        error "xl/workbook.xml is missing - this is not an .xlsx workbook\n(an .xls or .xlsm saved under the wrong name will do this)"
+    }
+
+    array set lStr {}
+    set lStrN 0
+    set lSsXml [::mUtilMenu::ZipXmlPart $lData lZip "xl/sharedStrings.xml"]
+    if { $lSsXml ne "" } {
+        set lStrN [::mUtilMenu::XlsxSharedStrings $lSsXml lStr]
+    }
+    ::mUtilMenu::Out [format "  %-14s %s" "strings" "$lStrN shared string(s)"]
+
+    set lSheets [::mUtilMenu::XlsxSheetList \
+        [::mUtilMenu::ZipXmlPart $lData lZip "xl/workbook.xml"] \
+        [::mUtilMenu::ZipXmlPart $lData lZip "xl/_rels/workbook.xml.rels"]]
+    ::mUtilMenu::Out [format "  %-14s %s" "sheets" "[llength $lSheets]"]
+
+    set lSheetN 0
+    set lRowTot 0
+    foreach lSheet $lSheets {
+        incr lSheetN
+        set lName [lindex $lSheet 0]
+        set lPart [lindex $lSheet 1]
+
+        ::mUtilMenu::Out ""
+        ::mUtilMenu::Out "---- sheet $lSheetN/[llength $lSheets]  \"$lName\"  ($lPart) ----"
+
+        if { ![info exists lZip($lPart)] } {
+            ::mUtilMenu::Out "  (missing from the archive)"
+            continue
+        }
+
+        set lRows [::mUtilMenu::XlsxSheetRows \
+            [::mUtilMenu::ZipXmlPart $lData lZip $lPart] lStr]
+        incr lRowTot [llength $lRows]
+
+        set lShown 0
+        foreach lRow $lRows {
+            if { $mBomMaxRows > 0 && $lShown >= $mBomMaxRows } {
+                ::mUtilMenu::Out "  ... +[expr { [llength $lRows] - $lShown }] more row(s) - raise ::mUtilMenu::mBomMaxRows to see them"
+                break
+            }
+            incr lShown
+
+            set lCells [list]
+            foreach lCell [lindex $lRow 1] {
+                lappend lCells "[lindex $lCell 0]=[::mUtilMenu::FlattenCell [lindex $lCell 1]]"
+            }
+            ::mUtilMenu::Out [format "  r%-6s %s" [lindex $lRow 0] [join $lCells "  | "]]
+        }
+
+        ::mUtilMenu::Out "  -> [llength $lRows] row(s) with content"
+    }
+
+    ::mUtilMenu::Out ""
+    ::mUtilMenu::Out "  -> [llength $lSheets] sheet(s), $lRowTot row(s) with content in total"
+    return true
+}
+
+#-----------------------------------------------------------------------------
+# The comparison - BOM against design
+#
+# Two rules, both asked of the BOM and answered by the design.  The DIRECTION is
+# the same in each and it is not arbitrary: the BOM is the side making a claim
+# ("the board has these parts, in these packages"), so it is the side whose claims
+# get checked.  Parts the design has and the BOM does not are a different
+# question - a BOM that is merely incomplete - and answering it here would bury
+# the findings that matter under every mounting hole and fiducial in the design.
+#-----------------------------------------------------------------------------
+
+# Design rows -> pArrName(UPPERCASE reference) = list of that reference's rows.
+#
+# A LIST per reference and not one row, because a designator really can be placed
+# twice - DumpDesignRefFp says so when it happens - and rule 2 has to be able to
+# disagree with one placement while agreeing with another.
+#
+# Keyed uppercase because that is half of what "the same part" means here: R1 in
+# the BOM and r1 in the design are the same part.  Nothing else about the string is
+# touched - no trimming, no punctuation stripped, no leading zeros dropped - so
+# this is a case fold and not a normalisation.  The other half is the suffix rule,
+# and it lives in BomMatchRows rather than in the key, for the reason given there.
+proc ::mUtilMenu::BomIndexDesign { pRows pArrName } {
+    upvar 1 $pArrName lIdx
+    array unset lIdx
+
+    foreach lRow $pRows {
+        set lRef [lindex $lRow 0]
+        if { $lRef eq "" } {
+            continue
+        }
+        lappend lIdx([string toupper $lRef]) $lRow
+    }
+    return [array size lIdx]
+}
+
+# Every design row one BOM reference matches.  pKey must already be uppercase;
+# pArrName is what BomIndexDesign filled in.
+#
+# TWO THINGS COUNT AS THE SAME PART:
+#
+#   the reference itself          R21  ->  R21
+#   the reference plus ONE A-Z    R21  ->  R21A, R21B, R21C, R21D
+#
+# because that is how a part split across several placements is named - one BOM
+# line for R21 covers every R21x the design places - and without it every such
+# part reads as missing.
+#
+# THE SUFFIX IS ONLY ALLOWED ON THE DESIGN SIDE.  BOM R21 finds design R21C; BOM
+# R21C does not find design R21.  The BOM names the part and the design places it,
+# so the design is the side that gets to add the placement letter, and going the
+# other way would make BOM R21C match a design that only ever had an R21 - which
+# is a real difference between the two documents, not a naming convention.
+#
+# ONE letter, and a LETTER.  R21 does not match R21AB, and it does not match R210
+# or R2100 - the digit is what keeps R2 from swallowing R21, which is the whole
+# reason this is a suffix test and not a prefix test.
+#
+# Done as 26 lookups rather than by stripping a trailing letter off each design
+# reference and indexing on the stem.  The stem version cannot tell a placement
+# letter from a reference that simply ends in one: strip it and design R21 and
+# design R2 both key on R2, and the two get reported as each other.  Asking for
+# the 26 names that WOULD be placements of this exact reference never has that
+# question to answer.  26 hash lookups per distinct BOM reference is nothing
+# beside the design walk that produced the index.
+#
+# ALL matches are returned, not the first.  A part placed as R21A..R21D is four
+# placements with four footprints of their own, and rule 2 has to be able to
+# disagree with one of them.
+proc ::mUtilMenu::BomMatchRows { pKey pArrName } {
+    upvar 1 $pArrName lIdx
+
+    set lOut [list]
+    if { [info exists lIdx($pKey)] } {
+        lappend lOut {*}$lIdx($pKey)
+    }
+    foreach lCh [split "ABCDEFGHIJKLMNOPQRSTUVWXYZ" ""] {
+        if { [info exists lIdx($pKey$lCh)] } {
+            lappend lOut {*}$lIdx($pKey$lCh)
+        }
+    }
+    return $lOut
+}
+
+# Does a PCB Footprint carry this package size?
+#
+# SUBSTRING, case-insensitive: the BOM says "0402" and the design says "C0402",
+# "RESC1005X40N_0402" or "0402_L" depending on who drew the library, and all of
+# those are the same package.  Asking for equality would report every part in the
+# design as a mismatch.
+#
+# The cost is the mirror of the one mBomSizes already pays: a footprint that
+# happens to contain the four digits for some other reason reads as a match and
+# the real disagreement is missed.  That is the safer direction of the two - this
+# rule's findings are meant to be worth looking at one by one, and a rule that
+# cries wolf on a whole library naming convention would not be.
+proc ::mUtilMenu::FpHasSize { pFp pSize } {
+    if { $pFp eq "" || $pSize eq "" } {
+        return 0
+    }
+    return [expr { [string first [string tolower $pSize] [string tolower $pFp]] >= 0 }]
+}
+
+# The size KNOWLEDGE_BASE_PCBFOOTPRINT_1 says this footprint really is, or "" when
+# it has nothing to say about it.  See the variable for what is in it and why it
+# is matched whole rather than as a substring.
+#
+# The table is read through [info exists] rather than assumed: it is a bare global
+# and somebody can unset it from the Command Window, and losing the exceptions
+# should cost the exceptions and not the whole check.
+proc ::mUtilMenu::KbFootprintSize { pFp } {
+    set lFp [string trim $pFp]
+    if { $lFp eq "" || ![info exists ::KNOWLEDGE_BASE_PCBFOOTPRINT_1] } {
+        return ""
+    }
+
+    set lWant [string tolower $lFp]
+    foreach lEnt $::KNOWLEDGE_BASE_PCBFOOTPRINT_1 {
+        if { [string tolower [string trim [lindex $lEnt 0]]] eq $lWant } {
+            return [lindex $lEnt 1]
+        }
+    }
+    return ""
+}
+
+# The whole report, as the text the result window shows.  Returns {text findings},
+# findings being the total count both rules raised - the caller uses it for the
+# one-line summary it puts in the Command Window.
+#
+# Takes the two halves exactly as DumpBomFootprint and DumpDesignRefFp returned
+# them, and reads nothing else: no file, no design, no Dbo call.  Which is what
+# makes it testable on hand-written lists, and what keeps a rule change from
+# needing another walk of anything.
+proc ::mUtilMenu::BomCompareReport { pBomRecs pDesignRows pScope pFile } {
+    set lLines [list]
+    set lFound 0
+
+    set lDistinct [::mUtilMenu::BomIndexDesign $pDesignRows lDsn]
+
+    set lSized 0
+    foreach lRec $pBomRecs {
+        if { [lindex $lRec 1] ne "" } {
+            incr lSized
+        }
+    }
+
+    # Both rules ask the same question of the same key - "which design rows is
+    # this BOM reference" - so it is asked once per DISTINCT reference and kept.
+    # A BOM that names R21 on three rows costs one lookup, not three, and rule 2
+    # costs none at all.
+    array set lHit {}
+    foreach lRec $pBomRecs {
+        set lKey [string toupper [lindex $lRec 0]]
+        if { ![info exists lHit($lKey)] } {
+            set lHit($lKey) [::mUtilMenu::BomMatchRows $lKey lDsn]
+        }
+    }
+
+    lappend lLines "================================================================"
+    lappend lLines [::mUtilMenu::Banner "BOM Footprint Check"]
+    lappend lLines "================================================================"
+    lappend lLines [format "  %-18s %s" "design scope"   $pScope]
+    lappend lLines [format "  %-18s %s" "design parts"   "[llength $pDesignRows] placed, $lDistinct distinct Part Reference(s)"]
+    lappend lLines [format "  %-18s %s" "BOM file"       [file nativename $pFile]]
+    lappend lLines [format "  %-18s %s" "BOM references" "[llength $pBomRecs], $lSized with a FOOTPRINT_SIZE"]
+    lappend lLines ""
+
+    #-------------------------------------------------------------------------
+    # RULE 1 - every Part Reference the BOM names must exist in the design
+    #-------------------------------------------------------------------------
+    lappend lLines "BOM_Footprint_Check_RULE1 - Part Reference in the BOM, not in the design"
+    lappend lLines "----------------------------------------------------------------"
+
+    set lMiss [list]
+    array set lMissSeen {}
+    foreach lRec $pBomRecs {
+        set lKey [string toupper [lindex $lRec 0]]
+        if { [llength $lHit($lKey)] || [info exists lMissSeen($lKey)] } {
+            continue
+        }
+        set lMissSeen($lKey) 1
+        lappend lMiss $lRec
+    }
+
+    if { [llength $lMiss] == 0 } {
+        lappend lLines "BOM_Footprint_Check_RULE1: No mis-matching Part Reference found."
+    } else {
+        foreach lRec $lMiss {
+            lappend lLines [format "  %-16s BOM sheet \"%s\" row %s" \
+                [lindex $lRec 0] [lindex $lRec 2] [::mUtilMenu::OrDash [lindex $lRec 3]]]
+        }
+        lappend lLines ""
+        lappend lLines "  -> [llength $lMiss] Part Reference(s) not found in the design"
+        incr lFound [llength $lMiss]
+    }
+    lappend lLines ""
+
+    #-------------------------------------------------------------------------
+    # RULE 2 - where the BOM states a size, the design's footprint must carry it
+    #
+    # Only the references that HAVE a size and DO exist in the design - existence
+    # decided by exactly the rule above, placement letters and all, so a BOM line
+    # for R21 is checked against R21A..R21D's footprints.  A reference that does
+    # not exist is already a rule 1 finding, and reporting it again here as "size
+    # cannot be checked" would double every missing part in the report without
+    # adding anything to it.
+    #-------------------------------------------------------------------------
+    lappend lLines "BOM_Footprint_Check_RULE2 - FOOTPRINT_SIZE in the BOM, not in the design's PCB Footprint"
+    lappend lLines "----------------------------------------------------------------"
+
+    set lBad [list]
+    set lKbHits 0
+    array set lBadSeen {}
+    foreach lRec $pBomRecs {
+        set lRef  [lindex $lRec 0]
+        set lSize [lindex $lRec 1]
+        set lKey  [string toupper $lRef]
+
+        if { $lSize eq "" || ![llength $lHit($lKey)] } {
+            continue
+        }
+
+        foreach lRow $lHit($lKey) {
+            set lDRef [lindex $lRow 0]
+            set lFp   [lindex $lRow 1]
+            set lSch  [lindex $lRow 2]
+            set lPage [lindex $lRow 3]
+
+            # A row whose description named two sizes - "0402/0603" - agrees with a
+            # footprint carrying EITHER.  The BOM is the ambiguous one there, and
+            # calling a part wrong on the strength of our own ambiguity would be
+            # the reader's time wasted, not the BOM's.
+            #
+            # The exception table is asked SECOND, per size, and only where the
+            # footprint's own name did not already answer - see
+            # KNOWLEDGE_BASE_PCBFOOTPRINT_1.  It can only ever turn a finding into
+            # a match, so a wrong entry costs a missed mismatch and never a part
+            # wrongly accused.
+            set lKb [::mUtilMenu::KbFootprintSize $lFp]
+            set lOk  0
+            set lVia ""
+            foreach lOne [split $lSize "/"] {
+                if { [::mUtilMenu::FpHasSize $lFp $lOne] } {
+                    set lOk 1
+                    break
+                }
+                if { $lKb ne "" && [string equal -nocase $lKb $lOne] } {
+                    set lOk  1
+                    set lVia "kb"
+                    break
+                }
+            }
+            if { $lOk } {
+                if { $lVia eq "kb" } {
+                    incr lKbHits
+                }
+                continue
+            }
+
+            # One finding per reference per PLACEMENT, so a part placed as R21A and
+            # R21B with two different footprints is reported twice - they are two
+            # different facts.  The same reference arriving from two BOM rows is
+            # not, which is what the key guards against.
+            set lSeen "$lDRef|$lSch|$lPage|$lFp"
+            if { [info exists lBadSeen($lSeen)] } {
+                continue
+            }
+            set lBadSeen($lSeen) 1
+            lappend lBad [list $lRef $lDRef $lSize $lFp $lSch $lPage $lKb]
+        }
+    }
+
+    if { [llength $lBad] == 0 } {
+        lappend lLines "BOM_Footprint_Check_RULE2: No mis-matching PCB Footprint found."
+    } else {
+        foreach lRow $lBad {
+            set lFp [lindex $lRow 3]
+            if { $lFp eq "" } {
+                set lFpStr "(no PCB Footprint)"
+            } else {
+                set lFpStr "\"$lFp\""
+            }
+
+            # The table had an entry for this footprint and it STILL did not agree
+            # - shown, because "4r8p, which we know is 0603" against a BOM saying
+            # 0402 is a different conversation from a footprint nobody has an
+            # opinion about, and the reader should not have to go and look the
+            # entry up to find out which one this is.
+            if { [lindex $lRow 6] ne "" } {
+                append lFpStr " = [lindex $lRow 6]"
+            }
+
+            # The DESIGN's reference is what gets named, because that is the one
+            # to go and look at - and the BOM's too when the placement letter made
+            # them differ, so the row can still be found in the BOM it came from.
+            set lWho [lindex $lRow 1]
+            if { [string toupper [lindex $lRow 0]] ne [string toupper $lWho] } {
+                set lWho "[lindex $lRow 0] -> $lWho"
+            }
+
+            lappend lLines [format "  %-20s BOM %-10s design %-28s %s / %s" \
+                $lWho [lindex $lRow 2] $lFpStr \
+                [::mUtilMenu::OrDash [lindex $lRow 4]] [::mUtilMenu::OrDash [lindex $lRow 5]]]
+        }
+        lappend lLines ""
+        lappend lLines "  -> [llength $lBad] placement(s) whose PCB Footprint does not carry the BOM's size"
+        incr lFound [llength $lBad]
+    }
+
+    # Said whichever way rule 2 came out, and that is the point of it: an exception
+    # table nobody can see working is one nobody can tell is broken.  A run that
+    # expected the 4r8p parts to be excused and reports 0 here has a table that is
+    # not matching - a renamed footprint, most likely - and this is the line that
+    # says so before the findings get dismissed as noise.
+    if { $lKbHits > 0 } {
+        lappend lLines "  (+ $lKbHits placement(s) matched through KNOWLEDGE_BASE_PCBFOOTPRINT_1)"
+    }
+
+    return [list [join $lLines "\n"] $lFound]
+}
+
+# What the result window's Close does for this check: the report, and the BOM
+# dialog behind it if anything left it standing.
+#
+# Execute takes the dialog down before it starts work, so by the time this can be
+# clicked there is normally nothing left to close - the call is here for the one
+# case where there is, and because "Close closes the BOM Footprint Check window"
+# should be true of the button whatever route got the user to it.  Destroying a
+# window that is already gone is a no-op inside its catch.
+proc ::mUtilMenu::CloseResultAndBomCheck { } {
+    ::mUtilMenu::CloseResultWindow
+    ::mUtilMenu::CloseBomFootprintCheck
+}
+
+# Browse for the .xlsx.
+#
+# WHERE IT STARTS, in order, first one that is a real folder:
+#
+#   1  the folder the field already names   within a session, "the one next to the
+#                                           last one" is nearly always right
+#   2  mBomInitDir                          where the last Browse ended, from
+#                                           mUtilMenu.cfg - so a fresh Capture
+#                                           starts where the last one left off
+#   3  mCmpInitDir                          only on a fresh install, when 2 has
+#                                           never been set.  Somewhere beats
+#                                           nowhere, and the user navigates once.
+#
+# WHERE IT ENDS is written back to mBomInitDir and out to the config file, and to
+# NEITHER mCmpFile nor mCmpInitDir.  That separation is the whole reason this has
+# a label of its own: the Default Folder is the anchor for the two DESIGN fields -
+# see the comment on BrowseDesign - and a BOM two drives away from the .DSN has no
+# business moving it.
+#
+# Only the folder is remembered.  The file itself is not - see mBomFile.
+proc ::mUtilMenu::BrowseBomFile { } {
+    variable mBomWin
+    variable mBomFile
+    variable mBomInitDir
+    variable mCmpInitDir
+
+    set lOpts [list \
+        -parent $mBomWin \
+        -title "Select BOM File" \
+        -defaultextension ".xlsx" \
+        -filetypes { {"Excel Workbook" {.xlsx}} {"All Files" *} }]
+
+    set lDir ""
+    if { [string trim $mBomFile] ne "" } {
+        set lDir [file dirname [string trim $mBomFile]]
+    }
+    if { ![file isdirectory $lDir] } {
+        set lDir $mBomInitDir
+    }
+    if { ![file isdirectory $lDir] } {
+        set lDir $mCmpInitDir
+    }
+    if { [file isdirectory $lDir] } {
+        lappend lOpts -initialdir $lDir
+    }
+
+    set lFile [eval tk_getOpenFile $lOpts]
+    if { $lFile eq "" } {
+        return 0
+    }
+
+    set mBomFile [file nativename $lFile]
+    ::mUtilMenu::RememberBomDir [file dirname $lFile]
+    return 1
+}
+
+proc ::mUtilMenu::CloseBomFootprintCheck { } {
+    variable mBomWin
+    catch { destroy $mBomWin }
+}
+
+# Execute: the design side, then the BOM side, then the dialog is gone.
+#
+# THE ORDER IS BOTH OF THE THINGS THAT CAN GO WRONG FIRST, then all of the work.
+# The Project Manager selection is checked before the design is walked - a page
+# selected is a refusal, and finding that out after two minutes of walking would
+# be the wrong time to hear it - and the .xlsx is checked before EITHER, even
+# though it is used last.  Both tests cost nothing; a long walk thrown away
+# because the file field was empty costs everything, and the file field is the one
+# thing the user is looking straight at when they press the button.
+#
+# THE DIALOG IS TAKEN DOWN BEFORE THE WORK, not after.  The answer goes to the
+# Command Window, and a dialog left standing in front of it while several thousand
+# lines scroll past is in the way of the only thing this produces.  It also makes
+# "close it when you are done" true by construction rather than by remembering to
+# do it on every path out.
+#
+# THE TWO EXCEPTIONS both concern the field the user can fix from here: an empty
+# BOM file and one that cannot be read leave the dialog UP, because the fix is a
+# Browse away and closing the window somebody is standing in to correct a typo is
+# no help at all.  Same bargain DoSchematicCompareExecute strikes with its two
+# empty design fields.  Every other way out closes.
+proc ::mUtilMenu::DoBomFootprintCheckExecute { } {
+    variable mBomFile
+
+    set lFile [string trim $mBomFile]
+    ::mUtilMenu::Trace "BOM Footprint Check Execute: $lFile"
+
+    if { $lFile eq "" } {
+        catch { capDisplayMessageBox "Please select a BOM file (.xlsx)." \
+                                     "BOM Footprint Check" }
+        return true
+    }
+    if { ![file readable $lFile] } {
+        catch { capDisplayMessageBox "Cannot read:\n\n$lFile" \
+                                     "BOM Footprint Check" }
+        return true
+    }
+
+    # A path TYPED into the field rather than browsed to is remembered here -
+    # Browse writes the folder as it goes, this catches the other way of setting
+    # it.  Same place and same reason DoSchematicCompareExecute catches a typed
+    # Default Folder.
+    catch { ::mUtilMenu::RememberBomDir [file dirname $lFile] }
+
+    # BomCheckScope puts up its own message box for every way it can say no - it
+    # knows which no it is - so there is nothing to add here but the close.
+    set lScope [::mUtilMenu::BomCheckScope]
+    if { [lindex $lScope 0] eq "" } {
+        ::mUtilMenu::CloseBomFootprintCheck
+        return true
+    }
+
+    ::mUtilMenu::CloseBomFootprintCheck
+
+    # The design side first, and it is allowed to fail without taking the BOM side
+    # with it: the two halves are independent readings of two different files, and
+    # a design that will not walk is no reason to withhold what the BOM says.
+    set lDsnRows [list]
+    set lDsnOk   1
+    if { [catch {
+        set lDsnRows [::mUtilMenu::DumpDesignRefFp [lindex $lScope 2] [lindex $lScope 1]]
+    } lErr] } {
+        set lDsnOk 0
+        ::mUtilMenu::Trace "BOM Footprint Check, design side failed -> $lErr"
+        ::mUtilMenu::Out "BOM Footprint Check - design side FAILED: $lErr"
+        catch { capDisplayMessageBox "Could not read the design:\n\n[lindex $lScope 1]\n\n$lErr" \
+                                     "BOM Footprint Check" }
+    }
+
+    ::mUtilMenu::Out ""
+    set lBomRecs [list]
+    set lBomOk   1
+    if { [catch { set lBomRecs [::mUtilMenu::DumpBomFootprint $lFile] } lErr] } {
+        set lBomOk 0
+        ::mUtilMenu::Trace "BOM Footprint Check, BOM side failed -> $lErr"
+        ::mUtilMenu::Out "BOM Footprint Check - BOM side FAILED: $lErr"
+        catch { capDisplayMessageBox "Could not read the workbook:\n\n[file tail $lFile]\n\n$lErr" \
+                                     "BOM Footprint Check" }
+    }
+
+    # NEITHER HALF MISSING IS ALLOWED TO BECOME A RESULT.  With the design
+    # unreadable every reference in the BOM is "not in the design" and rule 1
+    # reports the entire BOM as broken; with the BOM unreadable both rules pass
+    # having checked nothing, and "No mis-matching Part Reference found" is then a
+    # lie in the most expensive direction there is.  So the report says what
+    # happened instead of scoring it.
+    if { !$lDsnOk || !$lBomOk } {
+        set lWhich [expr { !$lDsnOk && !$lBomOk ? "Neither side" : \
+                          (!$lDsnOk ? "The design side" : "The BOM side") }]
+        set lTxt "[::mUtilMenu::Banner {BOM Footprint Check}]\n\n$lWhich could not be read - see the Command Window.\n\nNo comparison was run: a missing half would make every rule\nreport either everything or nothing, and both are wrong."
+        ::mUtilMenu::Out "BOM Footprint Check - no comparison run ($lWhich could not be read)"
+        catch { ::mUtilMenu::ShowResultWindow "BOM Footprint Check - [::mUtilMenu::VerStr]" \
+                    $lTxt "::mUtilMenu::CloseResultAndBomCheck" }
+        return true
+    }
+
+    set lRes   [::mUtilMenu::BomCompareReport $lBomRecs $lDsnRows [lindex $lScope 1] $lFile]
+    set lTxt   [lindex $lRes 0]
+    set lFound [lindex $lRes 1]
+
+    # The report goes in the result window and NOT through Out.  It is the one
+    # thing here somebody needs to take away - paste into a mail, hand to layout -
+    # and the Command Window cannot be selected from reliably.  One line goes to
+    # the Command Window so the log still says the check ran and what it came to.
+    ::mUtilMenu::Out ""
+    ::mUtilMenu::Out "BOM Footprint Check - [expr { $lFound == 0 ? "no findings" : "$lFound finding(s)" }], report window opened"
+
+    ::mUtilMenu::ShowResultWindow "BOM Footprint Check - [::mUtilMenu::VerStr]" \
+        $lTxt "::mUtilMenu::CloseResultAndBomCheck"
+    return true
+}
+
+proc ::mUtilMenu::DoBomFootprintCheck { pVia } {
+    variable mBomWin
+
+    ::mUtilMenu::Trace "BOM Footprint Check callback reached via $pVia"
+
+    if { [catch { package require Tk } lErr] } {
+        set lMsg "Tk is not available in this Capture session.\n\nSee section 1.4 \"Capture TCL/Tk Advanced Environment Setup\"\nof OrCAD_Capture_TclTk_Extensions.pdf (p.15-16).\n\nTk reported: $lErr"
+        ::mUtilMenu::Out "mUtil: $lMsg"
+        catch { capDisplayMessageBox $lMsg "mUtil - BOM Footprint Check" }
+        return true
+    }
+
+    ::mUtilMenu::HideTkRoot
+
+    # Already open - bring it forward rather than building a second copy.
+    if { [winfo exists $mBomWin] } {
+        catch {
+            wm deiconify $mBomWin
+            raise $mBomWin
+            focus $mBomWin
+        }
+        return true
+    }
+
+    toplevel $mBomWin
+    wm title $mBomWin "BOM Footprint Check"
+    wm resizable $mBomWin 1 0
+    wm protocol $mBomWin WM_DELETE_WINDOW "::mUtilMenu::CloseBomFootprintCheck"
+
+    # Owned by the Capture main window so it cannot get lost behind it -
+    # SetAppWindowAsParent, PDF p.134, same as the other two dialogs.
+    catch { SetAppWindowAsParent [expr { [winfo id $mBomWin] }] }
+
+    set lBody $mBomWin.body
+    frame $lBody -padx 10 -pady 10
+    pack $lBody -side top -fill both -expand 1
+
+    label  $lBody.lbl -text "BOM File (.xlsx):" -anchor w
+    entry  $lBody.ent -width 60 -textvariable ::mUtilMenu::mBomFile
+    button $lBody.btn -text "Browse..." -width 10 \
+        -command "::mUtilMenu::BrowseBomFile"
+
+    grid $lBody.lbl -row 0 -column 0 -sticky w  -padx {0 6} -pady 4
+    grid $lBody.ent -row 0 -column 1 -sticky ew -padx {0 6} -pady 4
+    grid $lBody.btn -row 0 -column 2 -sticky e            -pady 4
+
+    grid columnconfigure $lBody 1 -weight 1
+
+    # bottom: Execute / Close
+    set lBtns $mBomWin.btns
+    frame $lBtns -padx 10
+    pack $lBtns -side bottom -fill x
+
+    button $lBtns.execute -text "Execute" -width 12 -default active \
+        -command "::mUtilMenu::DoBomFootprintCheckExecute"
+    button $lBtns.close   -text "Close"   -width 12 \
+        -command "::mUtilMenu::CloseBomFootprintCheck"
+
+    pack $lBtns.close   -side right -padx {6 0} -pady {4 10}
+    pack $lBtns.execute -side right          -pady {4 10}
+
+    bind $mBomWin <Return> "::mUtilMenu::DoBomFootprintCheckExecute"
+    bind $mBomWin <Escape> "::mUtilMenu::CloseBomFootprintCheck"
+
+    focus $lBody.ent
+    return true
+}
+
+#=============================================================================
 # Path A - mUtil top-level menu, via InsertXMLMenu
 #=============================================================================
 
-proc ::mUtilMenu::XmlSchematicCompare { args } { return [DoSchematicCompare "mUtil menu"] }
-proc ::mUtilMenu::XmlSchematicCheck   { args } { return [DoSchematicCheck   "mUtil menu"] }
-proc ::mUtilMenu::XmlClosePage        { args } { return [DoClosePage        "mUtil menu"] }
+proc ::mUtilMenu::XmlSchematicCompare { args } { return [DoSchematicCompare   "mUtil menu"] }
+proc ::mUtilMenu::XmlSchematicCheck   { args } { return [DoSchematicCheck     "mUtil menu"] }
+proc ::mUtilMenu::XmlBomFootprint     { args } { return [DoBomFootprintCheck  "mUtil menu"] }
+proc ::mUtilMenu::XmlClosePage        { args } { return [DoClosePage          "mUtil menu"] }
 
 proc ::mUtilMenu::initXmlMenu { } {
     catch {
@@ -10571,6 +12349,11 @@ proc ::mUtilMenu::initXmlMenu { } {
             "::mUtilMenu::XmlSchematicCheck" ""
         RegisterAction "mUtilSchCheckEnabler" "::mUtilMenu::True" "" \
             "::mUtilMenu::Enabler"           ""
+
+        RegisterAction "mUtilBomFpAction"  "::mUtilMenu::True" "" \
+            "::mUtilMenu::XmlBomFootprint" ""
+        RegisterAction "mUtilBomFpEnabler" "::mUtilMenu::True" "" \
+            "::mUtilMenu::Enabler"         ""
 
         RegisterAction "mUtilClosePageAction"  "::mUtilMenu::True" "" \
             "::mUtilMenu::XmlClosePage" ""
@@ -10603,6 +12386,15 @@ proc ::mUtilMenu::initXmlMenu { } {
                   "mUtilSchCheckAction" "mUtilSchCheckEnabler" "" ""] \
             ""]
 
+        # Anchored after Schematic Check for the same reason, and placed here so
+        # the plain insertion order says the same thing: Schematic Compare /
+        # Schematic Check / BOM Footprint Check / Close Page.
+        InsertXMLMenu [list \
+            [list $::mUtilMenu::mMenuId "mUtilBomFp"] "1" "mUtilSchCheck" \
+            [list "action" "BOM Footprint Check" "0" \
+                  "mUtilBomFpAction" "mUtilBomFpEnabler" "" ""] \
+            ""]
+
         InsertXMLMenu [list \
             [list $::mUtilMenu::mMenuId "mUtilClosePage"] "" "" \
             [list "action" "Close Page" "0" \
@@ -10619,23 +12411,27 @@ proc ::mUtilMenu::initXmlMenu { } {
 # Page-level callbacks get (pPage pOcc); design-level callbacks get (pLib).
 #=============================================================================
 
-proc ::mUtilMenu::PageSchematicCompare   { pPage pOcc } { DoSchematicCompare "Accessories (page)" }
-proc ::mUtilMenu::PageSchematicCheck     { pPage pOcc } { DoSchematicCheck   "Accessories (page)" }
-proc ::mUtilMenu::PageClosePage          { pPage pOcc } { DoClosePage        "Accessories (page)" }
-proc ::mUtilMenu::DesignSchematicCompare { pLib }       { DoSchematicCompare "Accessories (design)" }
-proc ::mUtilMenu::DesignSchematicCheck   { pLib }       { DoSchematicCheck   "Accessories (design)" }
-proc ::mUtilMenu::DesignClosePage        { pLib }       { DoClosePage        "Accessories (design)" }
+proc ::mUtilMenu::PageSchematicCompare   { pPage pOcc } { DoSchematicCompare  "Accessories (page)" }
+proc ::mUtilMenu::PageSchematicCheck     { pPage pOcc } { DoSchematicCheck    "Accessories (page)" }
+proc ::mUtilMenu::PageBomFootprint       { pPage pOcc } { DoBomFootprintCheck "Accessories (page)" }
+proc ::mUtilMenu::PageClosePage          { pPage pOcc } { DoClosePage         "Accessories (page)" }
+proc ::mUtilMenu::DesignSchematicCompare { pLib }       { DoSchematicCompare  "Accessories (design)" }
+proc ::mUtilMenu::DesignSchematicCheck   { pLib }       { DoSchematicCheck    "Accessories (design)" }
+proc ::mUtilMenu::DesignBomFootprint     { pLib }       { DoBomFootprintCheck "Accessories (design)" }
+proc ::mUtilMenu::DesignClosePage        { pLib }       { DoClosePage         "Accessories (design)" }
 
 proc ::mUtilMenu::addPageAccessoryMenu { } {
-    AddAccessoryMenu "mUtil" "Schematic Compare" "::mUtilMenu::PageSchematicCompare"
-    AddAccessoryMenu "mUtil" "Schematic Check"   "::mUtilMenu::PageSchematicCheck"
-    AddAccessoryMenu "mUtil" "Close Page"        "::mUtilMenu::PageClosePage"
+    AddAccessoryMenu "mUtil" "Schematic Compare"   "::mUtilMenu::PageSchematicCompare"
+    AddAccessoryMenu "mUtil" "Schematic Check"     "::mUtilMenu::PageSchematicCheck"
+    AddAccessoryMenu "mUtil" "BOM Footprint Check" "::mUtilMenu::PageBomFootprint"
+    AddAccessoryMenu "mUtil" "Close Page"          "::mUtilMenu::PageClosePage"
 }
 
 proc ::mUtilMenu::addDesignAccessoryMenu { } {
-    AddAccessoryMenu "mUtil" "Schematic Compare" "::mUtilMenu::DesignSchematicCompare"
-    AddAccessoryMenu "mUtil" "Schematic Check"   "::mUtilMenu::DesignSchematicCheck"
-    AddAccessoryMenu "mUtil" "Close Page"        "::mUtilMenu::DesignClosePage"
+    AddAccessoryMenu "mUtil" "Schematic Compare"   "::mUtilMenu::DesignSchematicCompare"
+    AddAccessoryMenu "mUtil" "Schematic Check"     "::mUtilMenu::DesignSchematicCheck"
+    AddAccessoryMenu "mUtil" "BOM Footprint Check" "::mUtilMenu::DesignBomFootprint"
+    AddAccessoryMenu "mUtil" "Close Page"          "::mUtilMenu::DesignClosePage"
 }
 
 proc ::mUtilMenu::initAccessoryMenu { } {
@@ -10664,11 +12460,13 @@ proc ::mUtilMenu::init { } {
 proc ::mUtilMenu::remove { } {
     ::mUtilMenu::CloseSchematicCompare
     ::mUtilMenu::CloseSchematicCheck
+    ::mUtilMenu::CloseBomFootprintCheck
     ::mUtilMenu::ClosePageSelector
     ::mUtilMenu::CloseResultWindow
     catch {
         DeleteXMLMenu [list $::mUtilMenu::mMenuId "mUtilSchCompare"]
         DeleteXMLMenu [list $::mUtilMenu::mMenuId "mUtilSchCheck"]
+        DeleteXMLMenu [list $::mUtilMenu::mMenuId "mUtilBomFp"]
         DeleteXMLMenu [list $::mUtilMenu::mMenuId "mUtilExpOut"]
         DeleteXMLMenu [list $::mUtilMenu::mMenuId "mUtilClosePage"]
         DeleteXMLMenu [list $::mUtilMenu::mMenuId]
