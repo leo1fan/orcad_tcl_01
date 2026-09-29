@@ -1,8 +1,17 @@
-# mUtil — OrCAD Capture 17.4 自製工具選單 -- 
-# 新舊版線路比對、
-# NETs線距過近檢查
+# mUtil — OrCAD Capture 17.4 自製工具選單
 
-在 Capture 的主選單列加上一個 **mUtil** 選單，提供四個原廠沒有的功能：比對兩份設計、檢查單一設計的畫法問題、拿 BOM 反查設計的位號與包裝尺寸、一次收乾淨開啟的頁面。
+**新舊版線路比對 · NETs 線距過近檢查 · BOM footprint 反查**
+
+在 Capture 的主選單列加上一個 **mUtil** 選單，提供四個原廠沒有的功能：
+
+| # | 選單項目 | 做什麼 | 怎麼指定範圍 | 結果在哪 |
+|---|---|---|---|---|
+| 1 | **Schematic Compare** | 比對新舊兩份 .DSN，差異**直接畫在圖頁上** | 對話框選兩個 .DSN，再勾要比的頁 | 圖頁標記 + 文字視窗 |
+| 2 | **Schematic Check** | 單一設計的畫法問題：NET 沒對齊格點、同名 NET 沒 global 參照 | Project Manager 選頁／schematic／.DSN／.OPJ | 圖頁標記 + 文字視窗 |
+| 3 | **BOM Footprint Check** | 拿 BOM (.xlsx) 反查設計：位號有沒有、包裝尺寸對不對 | Project Manager 選 schematic／.DSN／.OPJ | 文字視窗 |
+| 4 | **Close Page** | 關掉所有開著的圖頁，**留住 Project Manager** | 不用選 | — |
+
+文字視窗都是唯讀但可選取複製的（不是訊息方塊），報告可以直接貼進 mail。
 
 | 版本 | 1.02 |
 |---|---|
@@ -12,6 +21,7 @@
 
 > [!WARNING]
 > **這不是 Cadence 原廠檔案。** 安裝 Capture hotfix 會把 `capAutoLoad` 底下它不認得的檔案刪掉，`mUtilMenu.tcl` 也在內。請在 Cadence 安裝目錄以外另存一份，升版後放回去。
+
 <img width="575" height="323" alt="orcad-compare-01" src="https://github.com/user-attachments/assets/9c217f37-a7d5-405a-a847-6d7e1cf31738" />
 
 ---
@@ -143,58 +153,32 @@ set ::SCH_CHECK_ITEM2 0
 
 ## 3. BOM Footprint Check — 拿 BOM 反查 Design
 
-按 Execute 會讀 Design 每一頁的 Part Reference 與 PCB Footprint、讀 BOM 的 Part Reference 與 FOOTPRINT_SIZE，然後用兩條規則比對，結果開在一個**可以選取複製的文字視窗**裡。
+讀設計每一頁的 `Part Reference` 與 `PCB Footprint`，讀 BOM 的位號與包裝尺寸，用兩條規則比對，報告開在可選取複製的文字視窗。
 
-| 欄位／按鈕 | 作用 |
-|---|---|
-| BOM File (.xlsx) | 要讀的檔案。**每次開 Capture 都是空白**，只有資料夾會被記住 —— 見下節 |
-| **Execute** | 讀 Design → 讀 BOM → 比對 → 開報告視窗。**做完自動關閉本視窗** |
-| **Close** | 只關視窗，不做任何事 |
+### 操作
 
-### 檔案欄位與記住的資料夾
-
-**BOM File 欄位每次開 Capture 都是空白的**，不會自動填上一次用的檔案。BOM 改版的頻率遠高於它對應的設計，從上週的設定檔還原回來的路徑，指到的很可能已經是舊版了 —— 而 Execute 就在旁邊一個按鍵的距離。空白欄位不會被誤按，它在說「選一個」。
-
-**記住的是資料夾**，存在 `mUtilMenu.cfg` 裡，用自己的標籤 `mBomInitDir`，跟 Schematic Compare 的 `mCmpInitDir` 並排但各自獨立：
-
-```
-# mUtilMenu remembered settings - safe to delete
-mCmpInitDir G:\Project\MB\Yu-hsuan\compare
-mBomInitDir G:\Project\MB\W980_WS\BOM
-```
-
-兩個標籤而不是一個，因為兩個對話框看的是不同地方：BOM 跟採購文件放在一起，.DSN 跟 layout 放在一起，常常還在不同的磁碟機上。共用一個錨點的話，替 BOM 按一次 Browse 就會改掉 Schematic Compare 下次開始找設計的位置，反之亦然。設定檔裡**只存資料夾，不存任何檔案路徑**。
-
-Browse... 的起始位置依序取第一個真的存在的：
-
-| 順序 | 來源 | 時機 |
-|---|---|---|
-| 1 | 欄位目前指到的資料夾 | 同一次 session 內，「上一個旁邊那個」幾乎都是對的 |
-| 2 | `mBomInitDir` | 上次 Browse 結束的地方，從 `mUtilMenu.cfg` 讀回來 |
-| 3 | `mCmpInitDir` | 只有全新安裝、2 還沒設定過時。有地方總比沒地方好 |
-
-在欄位裡**手打**路徑不按 Browse 也會被記住 —— Execute 時補記一次，跟 Schematic Compare 對手打的 Default Folder 做法一樣。
-
-記住的資料夾如果已經不在了（網路磁碟沒掛、資料夾被刪），載入時會直接忽略那個值，不會讓 Browse 從一個不存在的地方開始。
-
-### 先在 Project Manager 選好範圍
-
-按 Execute 之前，PROJECT_MANAGER_VIEW 要選在 **schematic、.DSN 或 .OPJ** 上。
+**① 先在 Project Manager 選好範圍**
 
 | 選的是 | 結果 |
 |---|---|
-| schematic（`DboSchematic`） | 跑這張 schematic 底下所有頁 |
-| Design `.DSN`（`DboDesign`） | 跑整份設計 |
-| Project `.OPJ` | 同上，用 Project Manager 目前開著的設計 |
-| **單一 page（`DboPage`）** | **不處理**，跳訊息方塊說明原因並關閉視窗 |
-| 沒選、或選到別的東西 | 同上，不處理並關閉視窗 |
+| schematic / `.DSN` / `.OPJ` | 跑它底下所有頁 |
+| **單一 page** | **不處理**，跳訊息說明原因並關閉視窗 |
+| 沒選、或選到別的 | 同上 |
 
 > [!IMPORTANT]
-> **為什麼 page 要擋掉。** BOM 是整片板子的料表，裡面每個位號都要在整份設計裡找。只比一頁的話，其他四十頁的零件全部會被報成「BOM 有、Design 沒有」—— 幾百筆全錯的結果，把真正有問題的那幾筆埋掉。沒有有用的答案可以給，所以直接拒絕而不是硬給一個爛答案。
+> BOM 是整片板子的料表，每個位號都要在**整份**設計裡找。只比一頁的話，其他四十頁的零件會全部被報成「BOM 有、Design 沒有」—— 幾百筆全錯的結果，把真正該看的那幾筆埋掉，所以直接拒絕。
+>
+> 同時選了 schematic **和**它底下某一頁時 **schematic 贏**，不會因為那一頁被拒絕。
 
-同時選了 schematic **和** 它底下的某一頁時，**schematic 贏**，不會因為那一頁而被拒絕。page 只有在它是唯一選取項目時才會擋下來 —— 這跟 Schematic Check 的「最窄者勝」不一樣，因為在這裡 page 根本不是一個可用的答案。
+**② 選 BOM 檔，按 Execute**
 
-### Execute 的執行順序
+| 欄位／按鈕 | 作用 |
+|---|---|
+| BOM File (.xlsx) | 要讀的檔案。**每次開 Capture 都是空白**，只有資料夾會被記住 |
+| **Execute** | 讀 Design → 讀 BOM → 比對 → 開報告視窗，**做完自動關閉本視窗** |
+| **Close** | 只關視窗，不做任何事 |
+
+執行順序：
 
 ```
 ① 檢查 BOM 檔欄位      空的／讀不到 → 跳訊息，視窗留著讓你改
@@ -202,169 +186,67 @@ Browse... 的起始位置依序取第一個真的存在的：
 ③ 關閉視窗
 ④ 走 Design，印出每頁的 Part Reference + PCB Footprint   → Command Window
 ⑤ 讀 BOM，印出 FOOTPRINT_SIZE + Part Reference           → Command Window
-⑥ 跑 RULE1 / RULE2，報告開在文字視窗                      → 可選取複製
+⑥ 跑 RULE1 / RULE2                                       → 報告視窗
 ```
 
-兩個檢查都排在所有工作之前：整份設計走一趟要時間，走完才告訴你「檔案欄位是空的」是最糟的時間點。視窗在**開始工作前**就收掉，不然幾千行輸出捲過去時它正好擋在 Command Window 前面。
+兩個檢查都排在工作之前 —— 整份設計走一趟要時間，走完才說「檔案欄位是空的」是最糟的時間點。只有 BOM 檔欄位那兩種錯會**留著視窗**讓你當場改，其他每一條路都會關。
 
-只有 BOM 檔欄位那兩種錯會把**視窗留著** —— 那是你當下正在看、按個 Browse 就能改好的東西，把人正站著的視窗收掉毫無幫助。其他每一條路都會關。
+④⑤ 的逐行 dump 是證據，留在 Command Window；⑥ 的報告才是要帶走的東西，所以開在文字視窗。
 
-④ 和 ⑤ 是獨立的：其中一邊讀失敗不會連帶取消另一邊。但**只要有一邊沒讀成功就不做比對** —— Design 讀不到的話 BOM 裡每一個位號都會變成「Design 沒有」，整份 BOM 被報成壞的；BOM 讀不到的話兩條規則都會「什麼都沒查到所以全過」，然後印出 `No mis-matching ... found.`，那是往最貴的方向說謊。這種情況報告視窗會直接說哪一邊沒讀到。
+> [!NOTE]
+> **有一邊沒讀成功就不做比對。** Design 讀不到的話，BOM 每一個位號都會變成「Design 沒有」；BOM 讀不到的話，兩條規則都會「什麼都沒查到所以全過」並印出 `No mis-matching ... found.` —— 後者是往最貴的方向說謊。這種情況報告視窗會直接說哪一邊沒讀到。
 
-④⑤ 的逐行 dump 是**證據**，留在 Command Window；⑥ 的報告才是要帶走的東西，所以開在文字視窗。Command Window 只留一行總結。
+### BOM 讀哪裡
 
-### Design 側輸出
-
-```
-================================================================
-mUtil 1.02  BOM Footprint Check - design side
-================================================================
-  scope            Design W980_WS.DSN
-  pages            42
-
----- SCHEMATIC1 / P01. POWER ----
-  CP203            CAPC2012X110N
-  PU1              -
-  R2               RESC1005X40N
-  R10              RESC1005X40N
-  -> 4 part(s)
-
-  -> 6 part(s) over 2 page(s), 5 distinct Part Reference(s), 1 with no PCB Footprint
-  -> NOTE: 1 part(s) share a Part Reference with another part
-```
-
-頁內按位號排序（dictionary order，所以 R2 排在 R10 前面），頁的順序照設計原本的順序，跟 Project Manager 樹上看到的一致。
-
-沒有 PCB Footprint 的零件印成 `-` 而不是略過 —— 那不是「沒東西」，那是 RULE2 要比的屬性不存在，本身就是一筆發現。
-
-最後兩個數字不一樣時會多印一行 NOTE：代表同一個位號被放了兩次。這會改變 BOM 比對的意義 —— BOM 寫一次、設計放兩顆，比對會過，但那還是錯的。
-
-只讀 `Part Reference` 與 `PCB Footprint` 兩個屬性，不走腳位。Schematic Compare 用的 `CollectPageParts` 一顆零件讀十一項還要走完每支腳（它自己的計時是 312 顆零件 1843 ms），這裡兩個檢查只需要兩個屬性，一百頁的設計差別就是「幾秒」跟「去泡杯咖啡」。
-
-### 讀哪裡（BOM 側）
-
-預設對應的是目前在用的 BOM 樣板，三個位置都是變數，換樣板改變數就好（見〈常用設定〉）：
+預設對應目前在用的樣板，換樣板改變數就好（見〈常用設定〉）：
 
 | 變數 | 預設 | 內容 |
 |---|---|---|
-| `mBomFirstRow` | `5` | 資料從第幾列開始。第 1–4 列是標題區與欄位名稱，讀進來會把「Part Reference」本身當成位號 |
-| `mBomDescCol` | `E` | 描述欄，包裝尺寸埋在裡面：`MLCC 10UF/16V(0805) X5R 10%` |
-| `mBomRefCol` | `K` | 位號欄，一格一串逗號分隔：`CP203,CP212,CP701,...,PCAON6,` |
+| `mBomFirstRow` | `5` | 資料從第幾列開始。第 1–4 列是標題區與欄位名稱 |
+| `mBomDescCol` | `E` | 描述欄，尺寸埋在裡面：`MLCC 10UF/16V(0805) X5R 10%` |
+| `mBomRefCol` | `K` | 位號欄，一格一串逗號分隔：`CP203,CP212,...,PCAON6,` |
 
-所有工作表都會走一遍 —— BOM 在第幾個分頁不是程式能知道的事。位號欄空白的列不印，所以封面頁、版本紀錄這種分頁自然就是 0 列。
+位號的前後空白與雙引號都會去掉，`"R1","R2" , "R3"` 和 `R1,R2,R3` 讀出來一樣；空片段丟棄（結尾那個逗號會切出空字串，留著就會拿空位號去查然後回報缺件）。
 
-### BOM 側輸出
+所有工作表都會走一遍 —— BOM 在第幾個分頁不是程式能知道的事。位號欄空白的列不算，所以封面頁、版本紀錄那種分頁自然就是 0 列。
 
-一個 BOM 列一行，先 FOOTPRINT_SIZE 再該列所有位號，位號之間用空白隔開：
+FOOTPRINT_SIZE 是在描述欄裡找 `0201` `0402` `0603` `0805` `1206` `1210` 這六個字串（`mBomSizes`），**子字串**比對 —— 尺寸寫成 `(0805)`、`0805`、` 0805 ` 的都有，沒有固定分隔符可以靠。找到兩個以上顯示 `0402/0603`，不會替你挑一個；一個都沒有顯示 `-`。
+
+### 兩側的 dump（Command Window）
 
 ```
-================================================================
-mUtil 1.02  BOM Footprint Check - W980_WS_BOM.xlsx
-================================================================
-  file             G:\Project\...\W980_WS_BOM.xlsx
-  size             68231 byte(s)
-  first data row   5
-  FOOTPRINT_SIZE   column E
-  Part Reference   column K
-
----- sheet 1/3  "BOM" ----
-  0805       CP203 CP212 CP701 CP702 CP703 CP704 F2C2 F2C3 F4C2 F4C3 F6C2 F6C3 F8C10 F8C11 F8C2 F8C3 F8C7 F8C8 PCAON1 PCAON2 PCAON32 PCAON6
-  0402       R1 R2 R3
-  -          PU1
-  0402/0603  F9C1 F9C2
-  -> 4 row(s) with Part References
-
-  -> 4 row(s), 28 part reference(s), 3 row(s) with a FOOTPRINT_SIZE
+---- SCHEMATIC1 / P01. POWER ----          ---- sheet 1/3  "BOM" ----
+  CP203            CAPC2012X110N             0805       CP203 CP212 CP701 ... PCAON6
+  PU1              -                         0402       R1 R2 R3
+  R2               RESC1005X40N              -          PU1
+  R10              RESC1005X40N              0402/0603  F9C1 F9C2
+  -> 4 part(s)                               -> 4 row(s) with Part References
 ```
 
-**FOOTPRINT_SIZE** 是在描述欄裡找 `0201` `0402` `0603` `0805` `1206` `1210` 這六個字串（`mBomSizes`），用**子字串**比對 —— 尺寸寫成 `(0805)`、`0805`、` 0805 ` 的都有，沒有一個固定的分隔符可以靠。
+- 設計側頁內按位號排序（dictionary order，R2 在 R10 前面），頁序照設計原本的順序。只讀兩個屬性、不走腳位，所以一百頁的設計是幾秒而不是幾分鐘。
+- 沒有 PCB Footprint 的零件印 `-` 而不是略過 —— 那是 RULE2 要比的屬性不存在，本身就是一筆發現。
+- 同一個位號被放兩次時會多印一行 `NOTE`：BOM 寫一次、設計放兩顆，比對會過，但那還是錯的。
+- 儲存格裡的換行（Alt+Enter）印成 `\n`，一列還是一行。數字讀出的是**儲存值**不是顯示格式（1.5% 讀出 0.015，日期讀出 45292）—— BOM 要比的位號、描述、footprint 都是文字，那部分是原樣的。
 
-| 情況 | 顯示 |
-|---|---|
-| 找到一個 | `0805` |
-| 找到兩個以上 | `0402/0603`，不會替你挑一個 |
-| 一個都沒有 | `-` |
+### RULE1 — BOM 有、Design 沒有的位號
 
-> [!IMPORTANT]
-> **沒有尺寸的列還是會印**，只是尺寸欄是 `-`。「沒有就不顯示」指的是那個**欄位**，不是整列：那些位號一樣要拿去跟 Design 對存在與否，把列丟掉等於把之後檢查的清單偷偷變小。
->
-> 反過來，**位號欄空白的列會整列丟掉** —— 那是標題、分隔列或註解，兩項檢查都用不到。
-
-位號的處理：逗號分隔，前後空白與雙引號都會去掉，所以 `"R1","R2" , "R3"` 和 `R1,R2,R3` 讀出來一樣。**空的片段直接丟棄** —— 結尾那個逗號會切出一個空字串，若不丟，之後就會拿一個空位號去 Design 裡查，然後回報「找不到」，那是讀檔自己憑空造出來的錯誤。
-
-### 讀得到什麼、讀不到什麼
-
-| 內容 | 結果 |
-|---|---|
-| 一般文字、共用字串 | 原樣讀出 |
-| 同一格內多種字型的文字（rich text） | 自動接回一串 |
-| 儲存格內嵌文字（inlineStr）、公式的文字結果 | 讀得到 |
-| 數字 | 讀出的是**儲存值**，不是畫面上看到的格式。顯示 1.5% 的格子讀出 0.015，日期讀出 45292 之類的序號 |
-| 圖片、註解、樞紐分析表 | 不讀 |
-
-數字要照格式呈現得解析 `xl/styles.xml` 並重做一套 Excel 的格式引擎，對現在這一步不划算。BOM 真正要比對的位號、描述、footprint 都是文字，那部分是原樣的。
-
-### 印出 0 列的時候
-
-代表欄位對不上，通常是換了 BOM 樣板。程式會直接告訴你去看哪兩個變數，另外有一個把整份工作表每一格都印出來的診斷指令，用它讀出描述與位號各在哪一欄，再回頭設定：
-
-```tcl
-::mUtilMenu::DumpXlsxText {G:/path/board_bom.xlsx}   ;# 印出每一格，含欄位字母
-set ::mUtilMenu::mBomFirstRow 3
-set ::mUtilMenu::mBomDescCol  F
-set ::mUtilMenu::mBomRefCol   D
-```
-
-`DumpXlsxText` 就是 1.01 時 Execute 印的東西，現在改成診斷用途，只能從 Command Window 叫。
-
-### 為什麼要自己解 .xlsx
-
-`.xlsx` 是一包 ZIP 裡的 XML，而 Capture 的 Tcl 兩條路都不通：
-
-```tcl
-package require vfs::zip   ;# can't find package vfs::zip
-package require tcom       ;# can't find package tcom
-```
-
-沒有 `vfs::zip` 就不能把壓縮檔掛成檔案系統，沒有 `tcom` 就不能用 COM 去驅動 Excel。能用的是 Capture 載入的 Tcl 8.6.5 核心內建的 `zlib inflate`，所以 ZIP 目錄與 XML 都是在 `mUtilMenu.tcl` 裡自己走的。
-
-就算 `tcom` 裝得起來，驅動 Excel 也是比較差的做法：每台要跑的機器都得裝 Excel、讀一個檔就開一次 Excel，而且檔案裡只要有巨集或外部連結，就會跳出一個**在 Capture 後面、使用者看不到**的強制對話框把整件事卡住。直接讀 bytes 不需要裝任何東西，也不會被檔案內容打斷。
-
-### 錯誤訊息
-
-| 訊息 | 意思 |
-|---|---|
-| `not a ZIP archive - no end-of-central-directory record` | 根本不是壓縮檔。副檔名改成 `.xlsx` 的 `.xls` 最常見 |
-| `xl/workbook.xml is missing - this is not an .xlsx workbook` | 是 ZIP 但不是活頁簿 |
-| `ZIP64 archive - not supported by this reader` | 超大檔（>4 GB 或 >65535 個項目），這個 reader 不支援 |
-
-### 比對結果
-
-報告開在一個唯讀文字視窗（跟 Schematic Compare／Schematic Check 共用同一個），有 **Select All**、**Copy**、**Close** 三個按鈕。文字可以直接拉選 + Ctrl-C，Copy 在沒選取時會複製整份。按 Close（或視窗的 X、或 Esc）會把報告視窗和 BOM Footprint Check 視窗一起收掉。
-
-兩條規則都是 **BOM → Design** 方向。BOM 是提出主張的那一方（「這片板子有這些料、用這些包裝」），所以被查的是 BOM 的主張。反過來「Design 有、BOM 沒有」是另一個問題（BOM 漏列），在這裡回答只會讓每一個定位孔、fiducial 把真正該看的結果淹掉。
-
-#### BOM_Footprint_Check_RULE1 — BOM 有、Design 沒有的位號
-
-BOM 的每個 Part Reference 都必須在 Design 裡找得到。兩種情況算「同一顆」：
+兩種情況算「同一顆」：
 
 | BOM | Design | |
 |---|---|---|
-| `R21` | `R21` | 完全相同（**大小寫不計**，`R21` = `r21`） |
-| `R21` | `R21A` `R21B` `R21C` `R21D` … `R21Z` | Design 後面多**一個** A–Z 字碼 |
+| `R21` | `R21` | 完全相同（**大小寫不計**） |
+| `R21` | `R21A` `R21B` … `R21Z` | Design 後面多**一個** A–Z placement 字碼 |
 
-一顆料拆成好幾個 placement 時就是這樣命名的 —— BOM 上一行 `R21` 涵蓋 Design 裡所有 `R21x`，不認這條規則的話這種料全部會被報成缺件。
-
-除此之外**字串必須完全相符**，是 case fold 不是正規化：不去空白、不去標點、不忽略前導零。
+一顆料拆成好幾個 placement 就是這樣命名的，BOM 上一行 `R21` 涵蓋設計裡所有 `R21x`。除此之外字串必須完全相符（不去空白、不去標點、不忽略前導零）：
 
 | 不算相同 | 為什麼 |
 |---|---|
-| `R21` vs `R210` | 多的是數字不是字母。這個判斷正是 `R2` 不會吃掉 `R21` 的原因 |
+| `R21` vs `R210` | 多的是數字不是字母 —— 這正是 `R2` 不會吃掉 `R21` 的原因 |
 | `PU1` vs `PU1AB` | 只允許**一個**字母 |
-| `R21C` vs `R21` | **字碼只能加在 Design 那一側** |
+| `R21C` vs `R21` | 字碼**只能加在 Design 那一側** |
 
 > [!NOTE]
-> **方向是固定的。** BOM 寫 `R21`，Design 放 `R21C` → 相符；BOM 寫 `R21C`，Design 只有 `R21` → **不相符，會列出來**。BOM 負責點名、Design 負責擺放，所以加 placement 字碼是 Design 那一側的權利。反過來的話，BOM 的 `R21C` 會去匹配一份從頭到尾只有 `R21` 的設計 —— 那是兩份文件真的不一樣，不是命名慣例。
+> 方向是固定的：BOM 寫 `R21`、Design 放 `R21C` → 相符；BOM 寫 `R21C`、Design 只有 `R21` → **不相符，會列出來**。BOM 負責點名、Design 負責擺放，所以加字碼是 Design 那一側的權利。
 
 ```
 BOM_Footprint_Check_RULE1 - Part Reference in the BOM, not in the design
@@ -375,17 +257,13 @@ BOM_Footprint_Check_RULE1 - Part Reference in the BOM, not in the design
   -> 2 Part Reference(s) not found in the design
 ```
 
-沒問題時：
+沒問題時：`BOM_Footprint_Check_RULE1: No mis-matching Part Reference found.`
 
-```
-BOM_Footprint_Check_RULE1: No mis-matching Part Reference found.
-```
+### RULE2 — BOM 的尺寸跟 Design 的 footprint 不符
 
-#### BOM_Footprint_Check_RULE2 — BOM 的尺寸跟 Design 的 footprint 不符
+只看**有 FOOTPRINT_SIZE、而且 RULE1 有找到**的位號（存在與否用 RULE1 同一套判斷，placement 字碼一起算）。找不到的已經是 RULE1 的結果，再報一次只會讓每筆缺料出現兩遍。
 
-只看**有 FOOTPRINT_SIZE、而且 RULE1 有找到**的位號 —— 存不存在用的是**跟 RULE1 完全同一套判斷**，placement 字碼一起算，所以 BOM 上一行 `R21` 會去比 `R21A`～`R21D` 每一個的 PCB Footprint。找不到的已經是 RULE1 的結果了，在這裡再報一次「無法比對尺寸」只會讓每一筆缺料在報告裡出現兩遍。
-
-比對方式是**子字串、不分大小寫**：BOM 寫 `0402`，Design 的 PCB Footprint 是 `C0402`、`RESC1005X40N_0402` 還是 `0402_L`，都算相符，不列出。
+比對是**子字串、不分大小寫**：BOM 寫 `0402`，Design 是 `C0402`、`RESC1005X40N_0402` 或 `0402_L` 都算相符。
 
 ```
 BOM_Footprint_Check_RULE2 - FOOTPRINT_SIZE in the BOM, not in the design's PCB Footprint
@@ -397,31 +275,25 @@ BOM_Footprint_Check_RULE2 - FOOTPRINT_SIZE in the BOM, not in the design's PCB F
   -> 3 placement(s) whose PCB Footprint does not carry the BOM's size
 ```
 
-左邊那一欄是**Design 的位號**，因為那才是要去翻的東西；placement 字碼讓兩邊不一樣時會寫成 `BOM位號 -> Design位號`，這樣也還找得回 BOM 上的那一行。
+左欄是**Design 的位號**（那才是要去翻的東西）；placement 字碼讓兩邊不同時寫成 `BOM位號 -> Design位號`，這樣也還找得回 BOM 上那一行。
 
 | 情況 | 處理 |
 |---|---|
-| Design 的 footprint 含該尺寸字串 | 相符，不列 |
-| Design 的 footprint 名稱裡根本沒有尺寸 | 查 `KNOWLEDGE_BASE_PCBFOOTPRINT_1`，見下 |
-| BOM 那列有兩個尺寸（`0402/0603`） | Design 含**其中任一個**就算相符。含糊的是 BOM，不該拿我們自己的含糊去判零件有罪 |
-| Design 沒有 PCB Footprint | 列出來，標 `(no PCB Footprint)` |
-| 一顆料拆成 `R21A`～`R21D` | **逐個 placement** 比，各自列出，因為那是四件不同的事實 |
-| 同一個位號在 BOM 出現兩行 | 只列一次，不會因為 BOM 重複而重複報 |
+| footprint 含該尺寸字串 | 相符，不列 |
+| footprint 名稱裡根本沒有尺寸 | 查例外表，見下 |
+| BOM 那列有兩個尺寸 | 含**任一個**就算相符 —— 含糊的是 BOM，不該拿我們自己的含糊去判零件有罪 |
+| Design 沒有 PCB Footprint | 列出，標 `(no PCB Footprint)` |
+| 一顆料拆成 `R21A`～`R21D` | **逐個 placement** 比，各自列出 |
+| 同一位號在 BOM 出現兩行 | 只列一次 |
 
-沒問題時：
+沒問題時：`BOM_Footprint_Check_RULE2: No mis-matching PCB Footprint found.`
 
-```
-BOM_Footprint_Check_RULE2: No mis-matching PCB Footprint found.
-```
+> [!NOTE]
+> 子字串比對的代價：footprint 名稱裡剛好有那四個數字（但不是在講尺寸）會被當成相符，真正的不一致就漏掉。這是兩個方向裡比較安全的那個 —— 這條規則每一筆都要人去看，一個對整套 library 命名慣例狂叫的規則沒人會看第二次。
 
 #### 例外表 KNOWLEDGE_BASE_PCBFOOTPRINT_1
 
-RULE2 是拿 BOM 的尺寸去 PCB Footprint 的名字裡找，對 `C0402`、`RESC1005X40N_0402` 這種命名沒問題，對**名字裡根本沒寫尺寸**的就沒轍了。`4r8p` 是 0603 的腳位，名字完全看不出來，所有用它畫的 0603 料都會被報成不符。這張表就是把這件事寫下來的地方：
-
-| PCB Footprint | 視為 |
-|---|---|
-| `4r8p` | `0603` |
-| `4r8p_h24` | `0603` |
+名字裡根本沒寫尺寸的 footprint 沒辦法用子字串找。`4r8p` 是 0603 的腳位，名字完全看不出來，所有用它畫的 0603 料都會被報成不符。這張表就是把這件事寫下來的地方：
 
 ```tcl
 set ::KNOWLEDGE_BASE_PCBFOOTPRINT_1 {
@@ -430,36 +302,55 @@ set ::KNOWLEDGE_BASE_PCBFOOTPRINT_1 {
 }
 ```
 
-三個要點：
+- **整串相符，不分大小寫。** 寫 `4r8p` 指的是 footprint **就是** `4r8p`，不是「含有」—— 所以 `4r8p_h24` 要另外寫一筆。這種四字元短 token 用子字串比對很容易在別的名字裡撞到，然後默默放掉一個真的不符；會亂放行的例外比沒有例外更糟。
+- **只在正常比對失敗之後才查**，所以一筆只可能把「不符」變成「相符」。寫錯的代價是漏掉一個不符，不會是冤枉一顆零件。
+- **表裡有這個 footprint 但尺寸還是對不上時，報告會寫出來**：`design "4r8p" = 0603`。那跟「一個沒人有意見的 footprint」是兩回事。
 
-- **整串相符，不分大小寫。** 這裡寫 `4r8p` 指的是 PCB Footprint **就是** `4r8p`，不是「含有」`4r8p` —— 所以 `4r8p_h24` 要另外寫一筆，不會被第一筆涵蓋。像 `4r8p` 這種四個字元的短 token，用子字串比對很容易在別的 footprint 名字裡撞到，然後**默默放掉一個真的不符**。會亂放行的例外比沒有例外更糟。加一個變體就是多一行，這個交換是划算的。
-- **只在正常比對失敗之後才查。** 所以表裡的一筆只可能把「不符」變成「相符」，不可能反過來。寫錯一筆的代價是漏掉一個不符，不會是冤枉一顆零件。
-- **表裡有這個 footprint、但尺寸還是對不上時，報告會把它寫出來**：
-
-```
-  R1                   BOM 0402       design "4r8p" = 0603                S1 / P1
-```
-
-  「`4r8p`，我們知道它是 0603」對上 BOM 寫的 0402，跟「一個沒人有意見的 footprint」是兩回事，不該讓讀的人自己去翻表才知道是哪一種。
-
-例外有生效時，RULE2 結尾會多一行（不管有沒有 findings 都會印）：
+例外有生效時，RULE2 結尾會多一行（有沒有 findings 都印）：
 
 ```
   (+ 12 placement(s) matched through KNOWLEDGE_BASE_PCBFOOTPRINT_1)
 ```
 
-看不見在運作的例外表，就是沒人能發現它壞掉的例外表。預期 `4r8p` 那些料會被放行、結果這行是 0 或根本沒出現，代表表沒對上（多半是 footprint 改名了）—— 這行會在你把那堆 findings 當雜訊略過之前先講。
+看不見在運作的例外表，就是沒人能發現它壞掉的例外表。預期那些料會被放行、結果這行沒出現，代表表沒對上（多半是 footprint 改名了）。
 
-想加一筆，在 Command Window 就能加：
+加一筆：`lappend ::KNOWLEDGE_BASE_PCBFOOTPRINT_1 {6r0p 0805}`。跟 `SCH_CHECK_ITEM1` 一樣是裸的全域變數，**重新 source 會蓋回去**，要長期留著請寫進 `mUtilMenu.tcl` 裡那份清單。
 
-```tcl
-lappend ::KNOWLEDGE_BASE_PCBFOOTPRINT_1 {6r0p 0805}
+### 檔案欄位與記住的資料夾
+
+**BOM File 欄位每次開 Capture 都是空白**，不會自動填上一次用的檔案 —— BOM 改版比設計頻繁，還原回來的路徑多半已經是舊版，而 Execute 就在旁邊一個按鍵的距離。
+
+記住的是**資料夾**，存在 `mUtilMenu.cfg`，用自己的標籤，跟 Schematic Compare 的並排但獨立：
+
+```
+mCmpInitDir G:\Project\MB\Yu-hsuan\compare
+mBomInitDir G:\Project\MB\W980_WS\BOM
 ```
 
-跟 `SCH_CHECK_ITEM1` 一樣是裸的全域變數，所以**重新 source 這個檔案會把它蓋回去**。要長期留著的，請直接寫進 `mUtilMenu.tcl` 裡那份清單。
+兩個標籤而不是一個，因為兩個對話框看的是不同地方（BOM 跟採購文件放一起，.DSN 跟 layout 放一起，常常還在不同磁碟機），共用一個錨點的話替 BOM 按一次 Browse 就會改掉 Schematic Compare 下次開始找設計的位置。設定檔裡**只存資料夾，不存檔案路徑**。
 
-> [!NOTE]
-> 子字串比對的代價跟 `mBomSizes` 那邊是一樣的：footprint 名稱裡剛好有那四個數字（但不是在講尺寸）會被當成相符，真正的不一致就漏掉了。這是兩個方向裡比較安全的那個 —— 這條規則的每一筆都是要人一筆一筆去看的，一個對整套 library 命名慣例狂叫的規則沒人會看第二次。
+Browse... 起始位置依序取第一個真的存在的：欄位目前指到的資料夾 → `mBomInitDir` → `mCmpInitDir`（只有全新安裝時）。手打路徑不按 Browse 也會在 Execute 時補記一次。記住的資料夾如果已經不在了（網路磁碟沒掛、被刪），載入時直接忽略。
+
+### 印出 0 列的時候
+
+欄位對不上，通常是換了 BOM 樣板。程式會直接告訴你去看哪兩個變數，另外有一個把每一格都印出來的診斷指令：
+
+```tcl
+::mUtilMenu::DumpXlsxText {G:/path/board_bom.xlsx}   ;# 印出每一格，含欄位字母
+set ::mUtilMenu::mBomFirstRow 3
+set ::mUtilMenu::mBomDescCol  F
+set ::mUtilMenu::mBomRefCol   D
+```
+
+### 讀 .xlsx 的限制
+
+`.xlsx` 是一包 ZIP 裡的 XML，而 Capture 的 Tcl 沒有 `vfs::zip` 也沒有 `tcom`，兩條現成的路都不通，所以 ZIP 目錄與 XML 是用 Tcl 8.6 內建的 `zlib inflate` 自己走的。共用字串、rich text、inlineStr、公式的文字結果都讀得到；圖片、註解、樞紐分析表不讀。
+
+| 錯誤訊息 | 意思 |
+|---|---|
+| `not a ZIP archive - no end-of-central-directory record` | 根本不是壓縮檔。副檔名改成 `.xlsx` 的 `.xls` 最常見 |
+| `xl/workbook.xml is missing - this is not an .xlsx workbook` | 是 ZIP 但不是活頁簿 |
+| `ZIP64 archive - not supported by this reader` | 超大檔（>4 GB 或 >65535 個項目），不支援 |
 
 ---
 
