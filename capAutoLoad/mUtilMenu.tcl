@@ -109,7 +109,7 @@
 #                   (mPageLinksReady / RedrawPageLinks), not while it is being
 #                   built, so they do not appear and then shift about.
 #                   Buttons, left to right: AllPagesComp, then a wide gap, then
-#                   OnePageCmp and Close.  Refcompare's button is built but not
+#                   MultiPageCmp, OnePageCmp and Close.  Refcompare's button is built but not
 #                   packed - the compare is still there, just not on screen; see
 #                   ShowPageSelector for the two ways to run it and the one line to
 #                   uncomment to bring the button back.
@@ -302,6 +302,22 @@
 #                   another design is clicked and clicked back.  See
 #                   RestorePMSelection / mRestorePM, and ::mUtilMenu::diagSaveState
 #                   if Save is ever greyed out again.
+#     MultiPageCmp the same run AllPagesComp does - RunLinkedPageCompare, so same
+#                   ComparePagePair per pair, same markers, same '*' rename on
+#                   (N), same "(N)(O)BOTH COMP" box, same one line per page in the
+#                   Command Window as it finishes - but over the TICKED pages
+#                   instead of every mapped pair.  Tick as many as you like in
+#                   both columns.
+#                   Checked before anything is compared: every ticked page, on
+#                   both sides, has to be one end of a mapping line (solid or
+#                   dashed) whose other end is ticked too.
+#                       no  -> "Page selection mis-matching", the unmatched page
+#                              names under it, and straight back to the page
+#                              selector with the ticks left as they were
+#                       yes -> compare the paired pages one page at a time
+#                   It refuses rather than filtering: a compare that quietly
+#                   skipped half the ticked pages would be worse than one that
+#                   will not start.  See DoMultiPageCompare.
 #     result window read-only Tk text widget, not a message box - the report can
 #                   be selected with the mouse and copied out.  Its Close button
 #                   (and its X, and Escape) closes the PAGE SELECTOR as well - the
@@ -370,7 +386,7 @@ namespace eval ::mUtilMenu {
     # returns them, diag prints them - and deliberately nowhere else: a dump is
     # for reading schematic data, not for reading a byline, and the column
     # alignment in those dumps is worked out to the character.
-    variable mVersion "1.02"
+    variable mVersion "1.03"
     variable mAuthor  "LEO"
     variable mCompany "ASROCK"
 
@@ -6185,6 +6201,36 @@ proc ::mUtilMenu::GetCheckedPages { pWhich } {
     return $lOut
 }
 
+# The same question as GetCheckedPages, answered with the COLUMN INDICES instead
+# of the {schematicName pageName} pairs.
+#
+# Why both exist: a page is identified two different ways in this file.  A
+# compare wants the pair, because that is what DumpPageInfo looks a page up by;
+# the MAPPING wants the index, because mPageLinks is {indexA indexB kind} - the
+# lines drawn across the gap are between POSITIONS in the two columns, not
+# between names, and two pages of one design can carry the same name.
+# MultiPageCmp has to ask "is this ticked page one end of a line", so it needs
+# the index.
+proc ::mUtilMenu::GetCheckedPageIdx { pWhich } {
+    variable mPagesA
+    variable mPagesB
+
+    if { $pWhich eq "A" } {
+        set lPages $mPagesA ; set lArr mPageSelA
+    } else {
+        set lPages $mPagesB ; set lArr mPageSelB
+    }
+
+    set lOut [list]
+    for { set i 0 } { $i < [llength $lPages] } { incr i } {
+        if { [info exists ::mUtilMenu::${lArr}($i)] \
+             && [set ::mUtilMenu::${lArr}($i)] } {
+            lappend lOut $i
+        }
+    }
+    return $lOut
+}
+
 #-----------------------------------------------------------------------------
 # Result window - where Compare / Refcompare / Schematic Check put their report.
 #
@@ -7557,10 +7603,6 @@ proc ::mUtilMenu::BothCompNormalize { } {
 # works.
 proc ::mUtilMenu::DoTotalPageCompare { } {
     variable mPageLinks
-    variable mPagesA
-    variable mPagesB
-    variable mPagesFileA
-    variable mPagesFileB
 
     if { [llength $mPageLinks] == 0 } {
         catch { capDisplayMessageBox \
@@ -7568,6 +7610,27 @@ proc ::mUtilMenu::DoTotalPageCompare { } {
                     "Schematic Compare - AllPagesComp" }
         return
     }
+
+    ::mUtilMenu::RunLinkedPageCompare $mPageLinks "AllPagesComp"
+}
+
+# The run itself, over whatever list of links it is handed.  Everything the block
+# comment above DoTotalPageCompare describes happens in here; the two callers
+# differ only in WHICH links they pass and in the name the run calls itself:
+#
+#   AllPagesComp   every link the selector drew - mPageLinks, the whole mapping
+#   MultiPageCmp   only the links whose BOTH ends the user ticked
+#
+# pLinks is mPageLinks or a subset of it, in the same {indexA indexB kind} form,
+# so the indices are still positions in mPagesA / mPagesB.  pLabel is the name
+# that goes on the header line, on each summary line, on the message box title
+# and into the trace - the label is a parameter rather than a literal so a run
+# can be told apart from the other one in a pasted-back log.
+proc ::mUtilMenu::RunLinkedPageCompare { pLinks pLabel } {
+    variable mPagesA
+    variable mPagesB
+    variable mPagesFileA
+    variable mPagesFileB
 
     set lPairs    0
     set lChanged  [list]
@@ -7581,14 +7644,14 @@ proc ::mUtilMenu::DoTotalPageCompare { } {
     # One header, then one line per pair - the two file names are said once here
     # rather than on every line, which is what keeps the per-pair line short enough
     # to read down.
-    ::mUtilMenu::Out "AllPagesComp - (N) [file tail $mPagesFileB]   (O) [file tail $mPagesFileA]"
+    ::mUtilMenu::Out "$pLabel - (N) [file tail $mPagesFileB]   (O) [file tail $mPagesFileA]"
     if { $lBoth } {
         ::mUtilMenu::Out "  (N)(O)BOTH COMP is on - every pair is compared both ways; only (N) is renamed"
     }
 
     set lErr ""
     if { [catch {
-        foreach lLink $mPageLinks {
+        foreach lLink $pLinks {
             set lPairA [lindex $mPagesA [lindex $lLink 0]]
             set lPairB [lindex $mPagesB [lindex $lLink 1]]
             if { [llength $lPairA] == 0 || [llength $lPairB] == 0 } {
@@ -7683,21 +7746,21 @@ proc ::mUtilMenu::DoTotalPageCompare { } {
             }
         }
     } lErr] } {
-        ::mUtilMenu::Trace "AllPagesComp failed -> $lErr"
-        catch { capDisplayMessageBox "AllPagesComp failed:\n\n$lErr" \
-                                     "Schematic Compare - AllPagesComp" }
+        ::mUtilMenu::Trace "$pLabel failed -> $lErr"
+        catch { capDisplayMessageBox "$pLabel failed:\n\n$lErr" \
+                                     "Schematic Compare - $pLabel" }
         return
     }
 
-    ::mUtilMenu::Out "AllPagesComp - $lPairs page pair(s) compared, [llength $lChanged] (N) page(s) marked"
+    ::mUtilMenu::Out "$pLabel - $lPairs page pair(s) compared, [llength $lChanged] (N) page(s) marked"
     if { $lBoth } {
-        ::mUtilMenu::Out "AllPagesComp - backward pass: [llength $lChangedO] (O) page(s) marked, none renamed"
+        ::mUtilMenu::Out "$pLabel - backward pass: [llength $lChangedO] (O) page(s) marked, none renamed"
     }
 
     catch { ZoomRedraw }
 
     # One line per page changed, so the box says which ones and not just how many.
-    set lMsg "AllPagesComp - [file tail $mPagesFileB]\n\n"
+    set lMsg "$pLabel - [file tail $mPagesFileB]\n\n"
     append lMsg "$lPairs page pair(s) compared.\n"
     append lMsg "[llength $lChanged] page(s) changed and renamed with a leading '*'."
     if { [llength $lChanged] > 0 } {
@@ -7733,10 +7796,10 @@ proc ::mUtilMenu::DoTotalPageCompare { } {
         append lMsg "."
     }
 
-    ::mUtilMenu::Trace "AllPagesComp: $lPairs pair(s), [llength $lChanged] (N) changed, [llength $lFailed] failed; backward [llength $lChangedO] (O) changed, [llength $lFailedO] failed"
+    ::mUtilMenu::Trace "$pLabel: $lPairs pair(s), [llength $lChanged] (N) changed, [llength $lFailed] failed; backward [llength $lChangedO] (O) changed, [llength $lFailedO] failed"
 
     # Modal - so the selector goes away once the count has been read, not before.
-    catch { capDisplayMessageBox $lMsg "Schematic Compare - AllPagesComp" }
+    catch { capDisplayMessageBox $lMsg "Schematic Compare - $pLabel" }
     ::mUtilMenu::ClosePageSelector
 
     # Last, once every Tk window of ours is gone: renaming the pages emptied the
@@ -7766,6 +7829,107 @@ proc ::mUtilMenu::DoTotalPageCompare { } {
     if { [llength $lChanged] > 0 } {
         ::mUtilMenu::RestorePMSelection $mPagesFileB
     }
+}
+
+# MultiPageCmp - OnePageCmp's answer to "I want these eight pages done, not one
+# and not all 148".
+#
+# It is AllPagesComp's run (RunLinkedPageCompare - same ComparePagePair per pair,
+# same net_compare_rule1..5 markers, same '*' rename on (N), same "(N)(O)BOTH
+# COMP" box, same one log line per page as it finishes) over the TICKED pages
+# only.
+#
+# WHAT IT CHECKS FIRST, and why it is a check and not a filter.  The two columns
+# are ticked independently, so "these pages" means two lists that have to agree -
+# and the only thing that says a page of (O) is the same page as a page of (N) is
+# the mapping line drawn between them in the selector, solid (exact name) or
+# dashed (similar name).  So every ticked page, on BOTH sides, must be one end of
+# a line whose other end is also ticked.  Anything else is a selection the user
+# did not mean:
+#
+#   ticked on one side only          nothing to compare it against
+#   ticked, but its partner is not   its partner would be compared silently, or
+#                                    not at all - either way not what was asked
+#   ticked with no line at all       no counterpart in the other design
+#
+# Any of those and the run does not start: "Page selection mis-matching", and the
+# page selector stays open with the ticks exactly as they were, so the selection
+# can be corrected rather than made again from scratch.  A filter would have been
+# the other choice - compare the pairs that do line up and quietly drop the rest -
+# but a compare that silently skips pages is the one thing worse than one that
+# refuses to start.
+#
+# The unmatched page names go in the box under the message.  "Mis-matching" on
+# its own is true and useless on a 148-page design; the names are what says where
+# to look.
+proc ::mUtilMenu::DoMultiPageCompare { } {
+    variable mPageLinks
+    variable mPagesA
+    variable mPagesB
+
+    set lIdxA [::mUtilMenu::GetCheckedPageIdx A]
+    set lIdxB [::mUtilMenu::GetCheckedPageIdx B]
+
+    ::mUtilMenu::Trace "MultiPageCmp: colA=[llength $lIdxA] ticked, colB=[llength $lIdxB] ticked, [llength $mPageLinks] link(s)"
+
+    if { [llength $lIdxA] == 0 || [llength $lIdxB] == 0 } {
+        catch { capDisplayMessageBox \
+                    "Page selection mis-matching\n\nTick the pages to compare in BOTH columns.  Each ticked page must be joined by a line - solid or dashed - to a ticked page of the other design." \
+                    "Schematic Compare - MultiPageCmp" }
+        return
+    }
+
+    # Membership tested through arrays rather than lsearch: a selection can be the
+    # whole design, and this is two walks over the links instead of one lsearch
+    # per link per side.
+    array set lOnA {}
+    array set lOnB {}
+    foreach i $lIdxA { set lOnA($i) 1 }
+    foreach j $lIdxB { set lOnB($j) 1 }
+
+    # The pairs to run: a link with BOTH ends ticked.  Kept in mPageLinks' own
+    # order, so the run reads down the columns the way the selector does.
+    set lLinks  [list]
+    array set lHitA {}
+    array set lHitB {}
+    foreach lLink $mPageLinks {
+        set i [lindex $lLink 0]
+        set j [lindex $lLink 1]
+        if { ![info exists lOnA($i)] || ![info exists lOnB($j)] } {
+            continue
+        }
+        lappend lLinks $lLink
+        set lHitA($i) 1
+        set lHitB($j) 1
+    }
+
+    # Every ticked page accounted for?  The pages that are not are the ones the
+    # message box names.
+    set lBad [list]
+    foreach i $lIdxA {
+        if { ![info exists lHitA($i)] } {
+            lappend lBad "(O) [::mUtilMenu::PageLabel [lindex $mPagesA $i]]"
+        }
+    }
+    foreach j $lIdxB {
+        if { ![info exists lHitB($j)] } {
+            lappend lBad "(N) [::mUtilMenu::PageLabel [lindex $mPagesB $j]]"
+        }
+    }
+
+    if { [llength $lBad] > 0 || [llength $lLinks] == 0 } {
+        ::mUtilMenu::Trace "MultiPageCmp: mis-matching selection - [llength $lBad] page(s) without a ticked counterpart"
+        set lMsg "Page selection mis-matching\n\n"
+        append lMsg "Every ticked page must be joined by a line - solid or dashed - to a ticked page of the other design."
+        if { [llength $lBad] > 0 } {
+            append lMsg "\n\nNot paired with a ticked page ([llength $lBad]):\n[join $lBad "\n"]"
+        }
+        catch { capDisplayMessageBox $lMsg "Schematic Compare - MultiPageCmp" }
+        # Straight back to the page selector, ticks untouched.
+        return
+    }
+
+    ::mUtilMenu::RunLinkedPageCompare $lLinks "MultiPageCmp"
 }
 
 # pMode: none = dump only, ref = parts matched by reference (Add/Remove/Changed),
@@ -8081,6 +8245,13 @@ proc ::mUtilMenu::ShowPageSelector { pFileA pFileB } {
     # Command Window banners call it, are the same.
     button $lBtns.pagecomp -text "OnePageCmp" -width 12 \
         -command "::mUtilMenu::DoPageCompare"
+    # MultiPageCmp sits immediately LEFT of OnePageCmp - the two are the same
+    # question asked of one pair or of several, so they belong next to each other,
+    # and the wide gap is still what keeps AllPagesComp away from both.
+    # -width 14 like AllPagesComp: "MultiPageCmp" is a character longer than
+    # "OnePageCmp" and 12 would have cut it on some themes.
+    button $lBtns.multicmp -text "MultiPageCmp" -width 14 \
+        -command "::mUtilMenu::DoMultiPageCompare"
     # Refcompare: BUILT BUT NOT PACKED - deliberately no button on screen.
     #
     # Kept whole rather than deleted, because the compare behind it is not going
@@ -8102,10 +8273,11 @@ proc ::mUtilMenu::ShowPageSelector { pFileA pFileB } {
     # whole remaining width of the button bar sits between them: it is the one
     # button that walks every page and renames what it finds, and it should not be
     # a slip of the mouse away from OnePageCmp.
-    # Packed right to left, so the bar reads OnePageCmp, Close.
+    # Packed right to left, so the bar reads MultiPageCmp, OnePageCmp, Close.
     pack $lBtns.allcmp   -side left            -pady {4 10}
     pack $lBtns.close    -side right -padx {6 0} -pady {4 10}
     pack $lBtns.pagecomp -side right -padx {6 0} -pady {4 10}
+    pack $lBtns.multicmp -side right -padx {6 0} -pady {4 10}
     # pack $lBtns.refcmp   -side right -padx {6 0} -pady {4 10}
 
     bind $mPagesWin <Escape> "::mUtilMenu::ClosePageSelector"
