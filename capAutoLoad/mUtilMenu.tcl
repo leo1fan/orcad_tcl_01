@@ -1830,6 +1830,7 @@ proc ::mUtilMenu::GetDesignPages { pDsnPath } {
 
     if { $lDesign == $lNullObj } {
         catch { $lStatus -delete }
+        ::mUtilMenu::DropCStr $lPath
         error "design not found in session: [file tail $pDsnPath]"
     }
 
@@ -1840,16 +1841,21 @@ proc ::mUtilMenu::GetDesignPages { pDsnPath } {
         # dynamic cast DboView -> DboSchematic, per 3.2.7
         set lSch     [DboViewToDboSchematic $lView]
         set lSchName [DboTclHelper_sMakeCString]
-        $lSch GetName $lSchName
+        # GetName returns a DboState on top of filling the CString - one name per
+        # schematic and one per page, so a 95-page design dropped close to 200
+        # objects here every time the page selector was opened.
+        ::mUtilMenu::DropState [$lSch GetName $lSchName]
         set lSchStr [DboTclHelper_sGetConstCharPtr $lSchName]
+        ::mUtilMenu::DropCStr $lSchName
 
         set lPagesIter [$lSch NewPagesIter $lStatus]
         set lPage      [$lPagesIter NextPage $lStatus]
 
         while { $lPage != $lNullObj } {
             set lPgName [DboTclHelper_sMakeCString]
-            $lPage GetName $lPgName
+            ::mUtilMenu::DropState [$lPage GetName $lPgName]
             lappend lResult [list $lSchStr [DboTclHelper_sGetConstCharPtr $lPgName]]
+            ::mUtilMenu::DropCStr $lPgName
             set lPage [$lPagesIter NextPage $lStatus]
         }
         catch { delete_DboSchematicPagesIter $lPagesIter }
@@ -1859,6 +1865,7 @@ proc ::mUtilMenu::GetDesignPages { pDsnPath } {
 
     catch { delete_DboLibViewsIter $lSchIter }
     catch { $lStatus -delete }
+    ::mUtilMenu::DropCStr $lPath
 
     return $lResult
 }
@@ -1941,14 +1948,116 @@ proc ::mUtilMenu::DropIter { pCmd } {
     catch { rename $pCmd {} }
 }
 
+#-----------------------------------------------------------------------------
+# THE OTHER HALF OF CAPTURE'S TCL MEMORY MODEL, and the half this file used to
+# get wrong everywhere.
+#
+# Iterators and DboStates were always released here.  The helper VALUE objects
+# were not, and they are the ones there are millions of:
+#
+#   DboTclHelper_sMakeCString / sMakeCPoint / sMakeCRect   allocate, and
+#   $pin GetOffsetHotSpot / $obj GetBoundingBox / $wire GetStartPoint
+#   RETURN a freshly allocated one as well.
+#
+# None of them is reference counted, and none is freed when the Tcl variable
+# holding the handle goes out of scope - the handle is a pointer string, not an
+# object Tcl owns.  Dropping it on the floor leaks the C++ object for the whole
+# life of the Capture process.
+#
+# A getter that fills a CString leaks TWICE over, which is the part that is easy
+# to miss: it fills the CString AND returns a DboState, and the shipped
+# capPDFExport/tcl/capPdfUtil.tcl:1197-1199 catches that state in a variable and
+# deletes it -
+#
+#     set lName    [DboTclHelper_sMakeCString]
+#     set lStatus1 [$pPin GetPinName $lName]
+#     $lStatus1 -delete
+#
+# - and a few lines further on, :1202-1211, it takes GetOffsetStartPoint and
+# GetOffsetHotSpot, reads the coordinates off them and calls
+# DboTclHelper_sDeleteCPoint on both.  That second block is the proof that
+# deleting a GETTER's return is correct and not only a Make's.
+#
+# capPdfUtil.tcl:672-690 is ObjBBoxDoc line for line - GetBoundingBox, the two
+# sGetCRect* points off it, read the X/Y, then sDeleteCRect and sDeleteCPoint
+# twice - so the bounding-box shape is sanctioned too, not inferred from the pin
+# one.  capAutoLoad/capAssociatePSpiceModel.tcl:621-623 is the plain
+# make -> read -> delete shape for a CString, and :372-373 releases the ones that
+# were hoisted outside a whole nested walk.
+#
+# Measured against orDb_Dll_Tcl64.dll loaded into tools\bin\tclsh.exe:
+#
+#     DboState  521 bytes each      CString  113 bytes each
+#     CRect      80 bytes each      CPoint    64 bytes each
+#
+# Five million unreleased CStrings is 635 MB of working set that never comes
+# back.  The allocator itself does not slow down - the cost is purely the memory
+# - but a design-wide AllPagesComp walks hundreds of pages at ~13 CStrings per
+# part and ~3 per pin, with a DboState behind each one, and that is hundreds of
+# megabytes per run that Capture only gets back when it exits.
+#
+# sGetConstCharPtr hands back a Tcl string and not a view into the CString, so
+# reading first and releasing straight after is safe - that is the order
+# capAssociatePSpiceModel.tcl uses.
+#
+# All four take any number of handles, skip "" and NULL, and are wrapped in
+# catch: they have to be callable on the FAILURE paths too, which is exactly
+# where the old code lost its handles.
+#
+# DboTclHelper_sReleaseAllCreatedPtrs would free the lot in one call, and the
+# shipped scripts do use it that way, but it is deliberately NOT used here: the
+# pool is process-wide, so it would also free pointers belonging to whatever
+# else in Capture is mid-operation.  Releasing what this file allocated, where it
+# allocated it, cannot do that.
+#-----------------------------------------------------------------------------
+proc ::mUtilMenu::DropCStr { args } {
+    foreach lH $args {
+        if { $lH eq "" || $lH eq "NULL" } { continue }
+        catch { DboTclHelper_sDeleteCString $lH }
+    }
+}
+
+proc ::mUtilMenu::DropPt { args } {
+    foreach lH $args {
+        if { $lH eq "" || $lH eq "NULL" } { continue }
+        catch { DboTclHelper_sDeleteCPoint $lH }
+    }
+}
+
+proc ::mUtilMenu::DropRect { args } {
+    foreach lH $args {
+        if { $lH eq "" || $lH eq "NULL" } { continue }
+        catch { DboTclHelper_sDeleteCRect $lH }
+    }
+}
+
+# The DboState a setter or a CString getter hands back.  Same shape as the other
+# three so the release lines read alike, but a DboState is a SWIG shadow object
+# and answers to -delete rather than to a helper function - sReleaseAllCreatedPtrs
+# does NOT reclaim these, which is measurable: 200,000 of them survive it.
+proc ::mUtilMenu::DropState { args } {
+    foreach lH $args {
+        if { $lH eq "" || $lH eq "NULL" } { continue }
+        catch { $lH -delete }
+    }
+}
+
 # One property off a placed instance, "" when it is not set.
+#
+# Two CStrings and one DboState per call, and this runs five or six times per
+# part on every page walk - see the release block above for what that came to
+# before any of it was freed.
 proc ::mUtilMenu::PropStr { pObj pPropName } {
     set lName  [DboTclHelper_sMakeCString $pPropName]
     set lValue [DboTclHelper_sMakeCString]
-    if { [catch { $pObj GetEffectivePropStringValue $lName $lValue }] } {
+    if { [catch { set lState [$pObj GetEffectivePropStringValue $lName $lValue] }] } {
+        ::mUtilMenu::DropCStr $lName $lValue
         return ""
     }
-    return [DboTclHelper_sGetConstCharPtr $lValue]
+    set lOut [DboTclHelper_sGetConstCharPtr $lValue]
+    ::mUtilMenu::DropState $lState
+    ::mUtilMenu::DropCStr  $lName $lValue
+    return $lOut
 }
 
 # Internal ("doc") units -> whatever mCoordMode asks for.  The user-unit
@@ -2032,15 +2141,35 @@ proc ::mUtilMenu::PointStr { pPage pPoint } {
 # still be mirrored or rotated.  Works for part instances, ports, globals and
 # off-page connectors alike (orPrmDboStreamer.tcl:1755,1798 uses both calls on
 # all four).
+#
+# Every handle is caught in a variable before it is used rather than being passed
+# straight into PointStr, because a handle that is only ever an argument cannot be
+# released afterwards - which is how GetLocation, GetBoundingBox and the two
+# sGetCRect* points used to leak four objects per object printed.
 proc ::mUtilMenu::ObjLocStr { pPage pObj pStatus } {
     set lOut ""
-    catch { set lOut [::mUtilMenu::PointStr $pPage [$pObj GetLocation $pStatus]] }
 
-    catch {
-        set lRect [$pObj GetBoundingBox]
-        set lTL   [::mUtilMenu::PointStr $pPage [DboTclHelper_sGetCRectTopLeft     $lRect]]
-        set lBR   [::mUtilMenu::PointStr $pPage [DboTclHelper_sGetCRectBottomRight $lRect]]
-        append lOut " bbox $lTL-$lBR"
+    set lPt ""
+    catch { set lPt [$pObj GetLocation $pStatus] }
+    if { $lPt ne "" } {
+        catch { set lOut [::mUtilMenu::PointStr $pPage $lPt] }
+        ::mUtilMenu::DropPt $lPt
+    }
+
+    set lRect ""
+    catch { set lRect [$pObj GetBoundingBox] }
+    if { $lRect ne "" } {
+        # Pre-set so the release below is unconditional: a catch that fell over
+        # half way still has to hand back whatever it did manage to allocate.
+        set lTLPt ""
+        set lBRPt ""
+        catch {
+            set lTLPt [DboTclHelper_sGetCRectTopLeft     $lRect]
+            set lBRPt [DboTclHelper_sGetCRectBottomRight $lRect]
+            append lOut " bbox [::mUtilMenu::PointStr $pPage $lTLPt]-[::mUtilMenu::PointStr $pPage $lBRPt]"
+        }
+        ::mUtilMenu::DropPt   $lTLPt $lBRPt
+        ::mUtilMenu::DropRect $lRect
     }
     return [string trim $lOut]
 }
@@ -2052,10 +2181,12 @@ proc ::mUtilMenu::ObjLocStr { pPage pObj pStatus } {
 # from.
 proc ::mUtilMenu::ObjLocDoc { pObj pStatus } {
     set lOut [list]
+    set lPt  ""
     catch {
         set lPt  [$pObj GetLocation $pStatus]
         set lOut [list [DboTclHelper_sGetCPointX $lPt] [DboTclHelper_sGetCPointY $lPt]]
     }
+    ::mUtilMenu::DropPt $lPt
     return $lOut
 }
 
@@ -2065,7 +2196,10 @@ proc ::mUtilMenu::ObjLocDoc { pObj pStatus } {
 # built off this instead.  Page coordinates run y downward, so top < bottom, which
 # is the order CRect itself wants.
 proc ::mUtilMenu::ObjBBoxDoc { pObj } {
-    set lOut [list]
+    set lOut  [list]
+    set lRect ""
+    set lTL   ""
+    set lBR   ""
     catch {
         set lRect [$pObj GetBoundingBox]
         set lTL   [DboTclHelper_sGetCRectTopLeft     $lRect]
@@ -2073,6 +2207,10 @@ proc ::mUtilMenu::ObjBBoxDoc { pObj } {
         set lOut  [list [DboTclHelper_sGetCPointX $lTL] [DboTclHelper_sGetCPointY $lTL] \
                         [DboTclHelper_sGetCPointX $lBR] [DboTclHelper_sGetCPointY $lBR]]
     }
+    # One CRect and two CPoints per call, and CollectPageParts calls this once per
+    # part on top of the ObjLocStr that already read the same box.
+    ::mUtilMenu::DropPt   $lTL $lBR
+    ::mUtilMenu::DropRect $lRect
     return $lOut
 }
 
@@ -2256,10 +2394,14 @@ proc ::mUtilMenu::SymHotSpotDoc { pObj pStatus } {
     set lCand [list]
     foreach lGetter { GetHotSpot GetOffsetHotSpot ComputeOffsetHotSpot } {
         set lPt [list]
+        set lC  ""
         catch {
             set lC  [$pObj $lGetter $pStatus]
             set lPt [list [DboTclHelper_sGetCPointX $lC] [DboTclHelper_sGetCPointY $lC]]
         }
+        # Released before the continue below, not after it - three getters are
+        # tried per symbol and the ones that fail the length test still allocated.
+        ::mUtilMenu::DropPt $lC
         if { [llength $lPt] != 2 } {
             continue
         }
@@ -2330,9 +2472,14 @@ proc ::mUtilMenu::SymHotSpotDoc { pObj pStatus } {
 # The two endpoints of one wire, "(x1,y1)-(x2,y2)".
 proc ::mUtilMenu::WireSegStr { pPage pWire pStatus } {
     set lSeg "?"
+    set lS   ""
+    set lE   ""
     catch {
-        set lSeg "[::mUtilMenu::PointStr $pPage [$pWire GetStartPoint $pStatus]]-[::mUtilMenu::PointStr $pPage [$pWire GetEndPoint $pStatus]]"
+        set lS [$pWire GetStartPoint $pStatus]
+        set lE [$pWire GetEndPoint   $pStatus]
+        set lSeg "[::mUtilMenu::PointStr $pPage $lS]-[::mUtilMenu::PointStr $pPage $lE]"
     }
+    ::mUtilMenu::DropPt $lS $lE
     return $lSeg
 }
 
@@ -2342,12 +2489,15 @@ proc ::mUtilMenu::WireSegStr { pPage pWire pStatus } {
 # are placed off this instead.
 proc ::mUtilMenu::WireSegDoc { pWire pStatus } {
     set lSeg [list]
+    set lS   ""
+    set lE   ""
     catch {
         set lS [$pWire GetStartPoint $pStatus]
         set lE [$pWire GetEndPoint   $pStatus]
         set lSeg [list [DboTclHelper_sGetCPointX $lS] [DboTclHelper_sGetCPointY $lS] \
                        [DboTclHelper_sGetCPointX $lE] [DboTclHelper_sGetCPointY $lE]]
     }
+    ::mUtilMenu::DropPt $lS $lE
     return $lSeg
 }
 
@@ -2411,10 +2561,19 @@ proc ::mUtilMenu::PropStrAny { pObj pNames } {
 
 proc ::mUtilMenu::CStr { pObj pGetter } {
     set lCStr [DboTclHelper_sMakeCString]
-    if { [catch { $pObj $pGetter $lCStr }] } {
+    # The getter RETURNS a DboState as well as filling the CString, and at 521
+    # bytes apiece those were the single largest leak in the file: this proc is
+    # called twice per pin and twice per part, so a 2971-pin page threw away
+    # about 3 MB of DboState on its own before anything else was counted.
+    # capPdfUtil.tcl:1197-1199 is the shipped shape.
+    if { [catch { set lState [$pObj $pGetter $lCStr] }] } {
+        ::mUtilMenu::DropCStr $lCStr
         return ""
     }
-    return [DboTclHelper_sGetConstCharPtr $lCStr]
+    set lOut [DboTclHelper_sGetConstCharPtr $lCStr]
+    ::mUtilMenu::DropState $lState
+    ::mUtilMenu::DropCStr  $lCStr
+    return $lOut
 }
 
 # What one page net is called, worked out from the net object alone.  Same answer
@@ -2565,10 +2724,13 @@ proc ::mUtilMenu::PinHotSpotDoc { pPin pStatus } {
     }
 
     set lOut [list]
+    set lPt  ""
     catch {
         set lPt  [$pPin GetOffsetHotSpot $pStatus]
         set lOut [list [DboTclHelper_sGetCPointX $lPt] [DboTclHelper_sGetCPointY $lPt]]
     }
+    # capPdfUtil.tcl:1203,1209 deletes the CPoint this exact getter returns.
+    ::mUtilMenu::DropPt $lPt
 
     if { $mTimeCompare } {
         incr mStatPosUs [expr { [clock microseconds] - $lT0 }]
@@ -5458,6 +5620,7 @@ proc ::mUtilMenu::FindPageObjs { pDsnPath pSchName pPageName } {
 
     if { $lDesign == $lNullObj } {
         catch { $lStatus -delete }
+        ::mUtilMenu::DropCStr $lPath
         error "design not found in session: [file tail $pDsnPath]"
     }
 
@@ -5486,6 +5649,7 @@ proc ::mUtilMenu::FindPageObjs { pDsnPath pSchName pPageName } {
 
     catch { delete_DboLibViewsIter $lSchIter }
     catch { $lStatus -delete }
+    ::mUtilMenu::DropCStr $lPath
 
     # The DESIGN is named as well as the page.  Both sides of a compare usually
     # have the same schematic name and the same page names - that is what makes
@@ -6474,10 +6638,12 @@ proc ::mUtilMenu::DrawPageLineOn { pPage pFrom pTo {pColor ""} {pWidth ""} \
     if { [catch { set lLine [$pPage NewGraphicLineInst $lStatus $lStart $lEnd \
                                  $lOrigin [::mUtilMenu::DboEnum DboValue_NOROTATION]] } lErr] } {
         catch { $lStatus -delete }
+        ::mUtilMenu::DropPt $lStart $lEnd $lOrigin
         error "NewGraphicLineInst failed: $lErr"
     }
     if { $lLine == $lNullObj } {
         catch { $lStatus -delete }
+        ::mUtilMenu::DropPt $lStart $lEnd $lOrigin
         error "NewGraphicLineInst returned NULL - is the design open and writable?"
     }
 
@@ -6488,6 +6654,9 @@ proc ::mUtilMenu::DrawPageLineOn { pPage pFrom pTo {pColor ""} {pWidth ""} \
     }
 
     catch { $lStatus -delete }
+    # See DrawPageBoxOn: the three points were arguments to a call that has
+    # already returned, so releasing them cannot reach the graphic.
+    ::mUtilMenu::DropPt $lStart $lEnd $lOrigin
     return $lLine
 }
 
@@ -6529,10 +6698,14 @@ proc ::mUtilMenu::DrawPageBoxOn { pPage pBBox {pColor ""} {pWidth ""} \
     if { [catch { set lBox [$pPage NewGraphicBoxInst $lStatus $lRect $lOrigin \
                                 [::mUtilMenu::DboEnum DboValue_NOROTATION]] } lErr] } {
         catch { $lStatus -delete }
+        ::mUtilMenu::DropPt   $lOrigin
+        ::mUtilMenu::DropRect $lRect
         error "NewGraphicBoxInst failed: $lErr"
     }
     if { $lBox == $lNullObj } {
         catch { $lStatus -delete }
+        ::mUtilMenu::DropPt   $lOrigin
+        ::mUtilMenu::DropRect $lRect
         error "NewGraphicBoxInst returned NULL - is the design open and writable?"
     }
 
@@ -6544,6 +6717,12 @@ proc ::mUtilMenu::DrawPageBoxOn { pPage pBBox {pColor ""} {pWidth ""} \
     }
 
     catch { $lStatus -delete }
+    # The rectangle and the origin were arguments to a call that has returned, so
+    # the graphic owns its own copy of the geometry by now and these are ours to
+    # release.  Low volume next to the page walks - a few per marker - but this is
+    # the only path that allocates on a per-marker basis.
+    ::mUtilMenu::DropPt   $lOrigin
+    ::mUtilMenu::DropRect $lRect
     return $lBox
 }
 
@@ -6894,6 +7073,11 @@ proc ::mUtilMenu::StarPageObj { pSch pPage {pDsnPath ""} } {
         ::mUtilMenu::DboSet $lLib RenameObject $pPage $lCStr
     }
 
+    # Rename has copied the name by now, on both routes, so the CString is ours to
+    # release - and it has to go before the early return below as well as after
+    # the success path, which is why it is released here rather than at the end.
+    ::mUtilMenu::DropCStr $lCStr
+
     # Believe the page, not the return code: whatever the DboState said, the name
     # either changed or it did not.
     if { [::mUtilMenu::CStr $pPage GetName] ne $lNew } {
@@ -7012,6 +7196,7 @@ proc ::mUtilMenu::FindDesign { pDsnPath } {
     set lPath   [DboTclHelper_sMakeCString [file normalize $pDsnPath]]
     set lDesign [$lSession GetDesignAndSchematics $lPath $lStatus]
     catch { $lStatus -delete }
+    ::mUtilMenu::DropCStr $lPath
     return $lDesign
 }
 
