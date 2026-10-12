@@ -7,18 +7,19 @@
 
 | # | 選單項目 | 做什麼 | 怎麼指定範圍 | 結果在哪 |
 |---|---|---|---|---|
-| 1 | **Schematic Compare** | 比對新舊兩份 .DSN，差異**直接畫在圖頁上** | 對話框選兩個 .DSN，再勾要比的頁 | 圖頁標記 + 文字視窗 |
+| 1 | **Schematic Compare** | 比對新舊兩份 .DSN，差異**直接畫在圖頁上** | 對話框選兩個 .DSN，再勾要比的頁：一頁、幾頁、或全部 | 圖頁標記 + 文字視窗 |
 | 2 | **Schematic Check** | 單一設計的畫法問題：NET 沒對齊格點、同名 NET 沒 global 參照 | Project Manager 選頁／schematic／.DSN／.OPJ | 圖頁標記 + 文字視窗 |
 | 3 | **BOM Footprint Check** | 拿 BOM (.xlsx) 反查設計：位號有沒有、包裝尺寸對不對 | Project Manager 選 schematic／.DSN／.OPJ | 文字視窗 |
 | 4 | **Close Page** | 關掉所有開著的圖頁，**留住 Project Manager** | 不用選 | — |
 
 文字視窗都是唯讀但可選取複製的（不是訊息方塊），報告可以直接貼進 mail。
 
-| 版本 | 1.02 |
+| 版本 | 1.03 |
 |---|---|
 | 檔案 | `capAutoLoad/mUtilMenu.tcl`（單檔，無其他相依） |
 | 環境 | OrCAD Capture 17.4，需要 Tcl/Tk |
 | 作者 | LEO, ASROCK |
+| 本版新增 | Schematic Compare 多了 **MultiPageCmp** —— 一次比對勾選的多組配對頁（[說明](#multipagecmp-的配對檢查103-新增)）。另外修掉了資料庫走訪的記憶體洩漏：CString / CPoint / CRect / DboState 現在用完即放，跑整份設計不再把記憶體留到 Capture 關閉為止 |
 
 > [!WARNING]
 > **這不是 Cadence 原廠檔案。** 安裝 Capture hotfix 會把 `capAutoLoad` 底下它不認得的檔案刪掉，`mUtilMenu.tcl` 也在內。請在 Cadence 安裝目錄以外另存一份，升版後放回去。
@@ -38,7 +39,7 @@
 `capAutoLoad` 底下的 `.tcl` 會在 Capture 啟動時自動載入。啟動後 Command Window 會出現：
 
 ```
-mUtil 1.02 loaded
+mUtil 1.03 loaded
 ```
 
 選單會出現在兩個地方（內容相同，用哪個都可以）：
@@ -85,13 +86,57 @@ source {G:/Cadence/SPB_17.4/tools/capture/tclscripts/capAutoLoad/mUtilMenu.tcl}
 
 **③ 執行比對**
 
-| 按鈕 | 作用 |
-|---|---|
-| **OnePageCmp** | 只比兩欄各勾選的那一頁。輸出完整 dump 與報告，不改頁名 |
-| **AllPagesComp** | 比對所有有配對線的頁面。有差異的 (N) 頁自動在名稱前加 `*` |
-| **(N)(O)BOTH COMP**（勾選框） | 預設開啟。每對頁面比兩次，反向以 (N) 為基準把差異畫在 (O) 上。**只有 (N) 會被改名** |
+三顆按鈕比的東西完全一樣（同一套區段比對、同五條網路規則、同樣的圖頁標記），差別在**範圍**與**輸出多寡**：
+
+| 按鈕 | 範圍 | 勾選方式 | 頁名加 `*` | 報告 |
+|---|---|---|---|---|
+| **OnePageCmp** | 一對頁 | 兩欄**各勾一頁**，不管有沒有配對線 | 不加 | 完整 dump + 文字視窗 |
+| **MultiPageCmp** | 勾選的幾對頁 | 兩欄想勾幾頁就勾幾頁，**必須兩兩配對** | 有差異的 (N) 頁加 | 每頁一行進度 + 總結訊息 |
+| **AllPagesComp** | 所有有配對線的頁 | 不用勾 | 有差異的 (N) 頁加 | 每頁一行進度 + 總結訊息 |
+
+**(N)(O)BOTH COMP**（選頁視窗下方的勾選框）預設開啟，對 **MultiPageCmp 與 AllPagesComp 都有效**：每對頁面比兩次，反向以 (N) 為基準把差異畫在 (O) 上，但**只有 (N) 會被改名**。
+
+按鈕在視窗底部的排法：**AllPagesComp 單獨靠左**，MultiPageCmp / OnePageCmp / Close 靠右。它是唯一會走完整份設計並改頁名的，刻意跟另外兩顆隔開，避免手滑。
 
 雙向比對不是重複做白工：只有「新增」的那一邊會被畫出來，所以只有 (O) 有的零件、net、接線，正向完全不會畫，正是反向要抓的。
+
+#### MultiPageCmp 的配對檢查（1.03 新增）
+
+只想比其中幾頁時用這顆。開跑前會先檢查勾選**兩邊是否對得起來**：每一個勾到的頁，都必須是某條配對線的一端，而且線的另一端也要有勾（**實線 exact、虛線 similar 都算**）。
+
+| 勾選情況 | 結果 |
+|---|---|
+| 兩邊勾的頁兩兩都有線相連 | 照配對線一頁一頁比 |
+| 只勾了一邊 | **不開跑** |
+| 勾到的頁，對面那一頁沒勾 | **不開跑** |
+| 勾到完全沒有配對線的頁（紅字那種） | **不開跑** |
+
+不開跑時顯示 `Page selection mis-matching`，底下列出配不到的頁名，直接回到選頁視窗，**勾選原封不動**可以當場改：
+
+```
+Page selection mis-matching
+
+Every ticked page must be joined by a line - solid or dashed - to a ticked page of the other design.
+
+Not paired with a ticked page (2):
+(O) SCH / P02. VCORE
+(N) SCH / P03. DDR
+```
+
+這裡是**擋下來**而不是自動略過配不到的頁 —— 安靜跳過一半勾選的比對，比不肯開跑還糟。
+
+每比完一頁在 Command Window 印一行，所以跑長一點的時候看得出進度與跑到哪：
+
+```
+MultiPageCmp - (N) new.dsn   (O) old.dsn
+  (N)(O)BOTH COMP is on - every pair is compared both ways; only (N) is renamed
+  (N) P01. CPU      (O) P01. CPU      Page comparison finished - no difference
+  (N) P02. VCORE    (O) P02. VCORE    Page comparison finished - 6 marker(s), '*' added
+  (O) P02. VCORE    (N) P02. VCORE    Page comparison finished - 2 marker(s), page name left alone
+MultiPageCmp - 2 page pair(s) compared, 1 (N) page(s) marked
+```
+
+被標記的那一頁排在行首（`(N)` 或 `(O)`），那就是接下來要打開看的頁。跑完出一個總結訊息方塊，按 OK 會把選頁視窗一起收掉。
 
 ### 比對什麼
 
@@ -395,7 +440,7 @@ set ::mUtilMenu::mRule4MarkMinPins 5
 | `mClosePageMode` | `perdesign` | Close Page 的模式 |
 | `mTimeCompare` | `1` | 印出比對各階段耗時 |
 | `mQuiet` | `0` | 1 = 不把 dump 印進 Command Window |
-| `::BOTH_N_O_COMP` | `1` | AllPagesComp 是否雙向比對（全域變數，非 namespace） |
+| `::BOTH_N_O_COMP` | `1` | MultiPageCmp / AllPagesComp 是否雙向比對（全域變數，非 namespace） |
 | `::KNOWLEDGE_BASE_PCBFOOTPRINT_1` | `{4r8p 0603} {4r8p_h24 0603}` | RULE2 的例外表：名字裡沒有尺寸的 footprint 實際是哪個尺寸（全域變數，非 namespace） |
 
 ---
