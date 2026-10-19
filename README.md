@@ -1,25 +1,26 @@
 
 # mUtil — OrCAD Capture 17.4 自製工具選單
 
-**新舊版線路比對 · NETs 線距過近檢查 · BOM footprint 反查**
+**新舊版線路比對 · NETs 線距過近檢查 · BOM footprint 反查 · BOM 與設計雙向對帳**
 
-在 Capture 的主選單列加上一個 **mUtil** 選單，提供四個原廠沒有的功能：
+在 Capture 的主選單列加上一個 **mUtil** 選單，提供五個原廠沒有的功能：
 
 | # | 選單項目 | 做什麼 | 怎麼指定範圍 | 結果在哪 |
 |---|---|---|---|---|
 | 1 | **Schematic Compare** | 比對新舊兩份 .DSN，差異**直接畫在圖頁上** | 對話框選兩個 .DSN，再勾要比的頁：一頁、幾頁、或全部 | 圖頁標記 + 文字視窗 |
 | 2 | **Schematic Check** | 單一設計的畫法問題：NET 沒對齊格點、同名 NET 沒 global 參照 | Project Manager 選頁／schematic／.DSN／.OPJ | 圖頁標記 + 文字視窗 |
 | 3 | **BOM Footprint Check** | 拿 BOM (.xlsx) 反查設計：位號有沒有、包裝尺寸對不對 | Project Manager 選 schematic／.DSN／.OPJ | 文字視窗 |
-| 4 | **Close Page** | 關掉所有開著的圖頁，**留住 Project Manager** | 不用選 | — |
+| 4 | **BOM Consistency Check** | BOM 與設計**雙向對帳**：BOM 點的料有沒有上板、設計上板的料有沒有進 BOM | Project Manager 選 schematic／.DSN | 文字視窗 |
+| 5 | **Close Page** | 關掉所有開著的圖頁，**留住 Project Manager** | 不用選 | — |
 
 文字視窗都是唯讀但可選取複製的（不是訊息方塊），報告可以直接貼進 mail。
 
-| 版本 | 1.03 |
+| 版本 | 1.04 |
 |---|---|
 | 檔案 | `capAutoLoad/mUtilMenu.tcl`（單檔，無其他相依） |
 | 環境 | OrCAD Capture 17.4，需要 Tcl/Tk |
 | 作者 | LEO, ASROCK |
-| 本版新增 | Schematic Compare 多了 **MultiPageCmp** —— 一次比對勾選的多組配對頁（[說明](#multipagecmp-的配對檢查103-新增)）。另外修掉了資料庫走訪的記憶體洩漏：CString / CPoint / CRect / DboState 現在用完即放，跑整份設計不再把記憶體留到 Capture 關閉為止 |
+| 本版新增 | 新選單項目 **BOM Consistency Check** —— 拿 `Optional` 欄位跟 BOM 雙向對帳，兩條規則一邊一個方向（[說明](#4-bom-consistency-check--bom-與設計雙向對帳)）。比的是 **Reference Designator**（`ORN1`）而不是 Part Reference（`ORN1A`），所以多 part 封裝的各個 section 併成一筆，不會整頁都報成 BOM 沒有 |
 
 > [!WARNING]
 > **這不是 Cadence 原廠檔案。** 安裝 Capture hotfix 會把 `capAutoLoad` 底下它不認得的檔案刪掉，`mUtilMenu.tcl` 也在內。請在 Cadence 安裝目錄以外另存一份，升版後放回去。
@@ -39,7 +40,7 @@
 `capAutoLoad` 底下的 `.tcl` 會在 Capture 啟動時自動載入。啟動後 Command Window 會出現：
 
 ```
-mUtil 1.03 loaded
+mUtil 1.04 loaded
 ```
 
 選單會出現在兩個地方（內容相同，用哪個都可以）：
@@ -400,7 +401,175 @@ set ::mUtilMenu::mBomRefCol   D
 
 ---
 
-## 4. Close Page — 收乾淨但留住 Project Manager
+## 4. BOM Consistency Check — BOM 與設計雙向對帳
+
+BOM Footprint Check 問的是「BOM 說的料，包裝尺寸畫對了沒」；這一個問的是更前面的問題：**兩份文件對「這塊板子上到底有什麼料」有沒有共識**。
+
+兩邊都可能是錯的那一邊，所以**兩條規則、一邊一個方向**：
+
+| 規則 | 方向 | 問什麼 | 錯了會怎樣 |
+|---|---|---|---|
+| **RULE1** | BOM → Design | BOM 點名的位號，設計裡**有沒有放**、而且**沒有被標成 `/X`** | 買了不用的料；或更糟，兩份文件在上線那天才發現講的不是同一件事 |
+| **RULE2** | Design → BOM | 設計上**會上板**的料（`Optional` 是空的或 `N/A`），BOM 裡**有沒有列** | 沒人去買，板子回來缺一顆 |
+
+### 操作
+
+跟 BOM Footprint Check 同一個形狀的對話框：一個 .xlsx 欄位 + Browse...，底下 Execute / Close，Enter 等於 Execute、Esc 等於 Close。兩個檢查常常是同一個人隔幾分鐘跑的，行為不一樣只會多一套習慣。
+
+**① 先在 Project Manager 選範圍**
+
+| 選的是 | 結果 |
+|---|---|
+| schematic / `.DSN` | 跑它底下所有頁 |
+| **page / `.OPJ` / 沒選** | **不處理**，跳訊息說明是哪一種拒絕，然後關閉視窗 |
+
+> [!NOTE]
+> `.OPJ` 雖然解得出跟底下 `.DSN` 一樣的頁，這裡還是擋掉 —— 這是需求訂的（可以點的就是 schematic 跟 design 兩種），不是技術限制。要放寬就改 `DoBomConsistencyCheckExecute` 裡那一行 `[list schematic design]` 加上 `project`。
+>
+> 對話框上有一行灰字提醒選取範圍：Project Manager 的選取是一半的輸入，卻不在這個視窗上。
+
+**② 選 BOM 檔，按 Execute**
+
+| 欄位／按鈕 | 作用 |
+|---|---|
+| BOM File (.xlsx) | **每次開 Capture 都是空白**，理由同 BOM Footprint Check：BOM 改版比設計頻繁 |
+| **Execute** | 檢查欄位 → 檢查 PM 選取 → 關視窗 → 走 Design → 讀 BOM → 跑兩條規則 → 開報告視窗 |
+| **Close** | 只關視窗，不做任何事 |
+
+欄位空的／讀不到檔的兩種錯**留著視窗**讓你當場改，其他每一條拒絕都會關窗。**有一邊沒讀成功就不做比對**：設計讀不到的話 RULE1 會把整份 BOM 報成沒上板、RULE2 什麼都不報；BOM 讀不到的話剛好反過來。兩個方向都會「很有自信地講錯話」，所以直接說哪一邊沒讀到。
+
+BOM 檔欄位記住的資料夾跟 BOM Footprint Check **共用** `mBomInitDir` —— 兩個都是 BOM，放在同一個地方，兩個錨點只會多一個走樣的機會。檔案路徑則各自獨立（`mBomFile` / `mBomCsFile`），免得站在其中一個視窗前面的人被另一個視窗的 Browse 改掉欄位。
+
+### 比的是 Reference Designator，不是 Part Reference
+
+這是本版最重要的一件事：
+
+| | 範例 | 一個對應到 |
+|---|---|---|
+| Part Reference | `ORN1A`, `ORN1B` | 畫在圖頁上的一個 **section** |
+| Reference Designator | `ORN1` | 一個 **package** —— 真正被買、被擺、被 netlist 的那個元件 |
+
+BOM 列的是元件，所以 BOM 上那一行寫的是 `ORN1`。拿 Part Reference 去比的話，每一個多 part 封裝的每一個 section 都會變成「BOM 沒聽過的料」。
+
+Reference Designator 是**跟資料庫要的**，不是把字串尾巴的字母砍掉：砍字串會錯三種 —— `R21` 對上 `R210`、本來就以字母結尾的位號、還有用 `ORN1-1` 這種數字式編號的封裝（根本沒有字母可砍）。哪些 part 是同一顆封裝的 section 只有 Capture 知道。
+
+取得順序是四層，第一個通過檢驗的就用：
+
+| 來源 | 說明 |
+|---|---|
+| 1. `Reference` 屬性 | 跟原廠 DRC `capPartReferencePrefixMismatch.tcl` 讀的是同一個東西 |
+| 2. `GetReferenceDesignator` | DboPlacedInst 的 API（Appendix A p.529） |
+| 3. derived | `PQ31A` → `PQ31`。**只有封裝本身說這顆是多 part 的時候才允許**，兩種編號形式都解（`PQ31A` 與 `PQ31-2`） |
+| 4. Part Reference 原樣 | 上面都沒答出來，那這顆就用自己的名字去比 —— 也就是沒讀封裝之前的舊行為 |
+
+每一個候選值都要過兩關：**形狀上可能是這顆的封裝名**（相等／多一個 A–Z／多一個 `-數字`），以及**多 part 封裝時不得等於 Part Reference 本身**（section 的封裝名一定比自己短；回一個 `PQ31A` 等於沒回答，實測就遇過）。不像的就丟掉，該 part 退回用自己的名字比 —— 一個共用的錯值（例如 `S` 同時蓋住 `SU1`／`SQ4`／`SRN1`）會把三顆不相干的料焊成一筆沒人能處理的發現，那比降級嚴重得多。
+
+Command Window 的設計側 dump 會把這件事攤開來，四欄加幾行統計：
+
+```
+  Pkg: 0 = single-part package, 1 = multi-part homogeneous, 2 = multi-part heterogeneous, - = not available
+  RefDes           Part Reference   Pkg  Optional
+  ORN1             ORN1A            1    -           <- derived
+  ORN1             ORN1B            1    -           <- derived
+  R6               R6               0    /X
+
+  -> 1842 part(s) over 46 page(s), 1731 distinct Reference Designator(s), 1842 distinct Part Reference(s)
+  -> 23 marked "/X" (not fitted), 1819 with Optional empty or "N/A" (fitted)
+  -> Pkg: 1680 single-part, 148 multi-part homogeneous, 14 multi-part heterogeneous, 0 not available
+  -> RefDes from: 1680 "Reference" property, 0 GetReferenceDesignator, 162 taken off the Part Reference, 0 left as the Part Reference
+  -> 162 part(s) are a section of a multi-part package (RefDes differs from Part Reference)
+```
+
+- 設計裡確實有 `ORN1A`／`ORN1B` 卻看到**最後一行是 0**，代表封裝查詢沒生效、全部退回 Part Reference：比對照跑，但跑的是舊的那一套，BOM 的 `ORN1` 會被報成「設計裡沒有」。
+- `Pkg` 欄是**獨立**從資料庫讀的，不是從前兩欄推的 —— 它跟 RefDes/Part Reference 這組答案互相對照。兩邊數字對不上時報告會直接寫一行 `NOTE` 說出來。
+- 被退掉的候選值會列在該 part 行尾（`<- ignored ...`），結尾再給一個樣本清單，貼回來就知道資料庫實際回了什麼。
+
+### Optional 怎麼讀
+
+| 值 | 意思 | 誰在管 |
+|---|---|---|
+| `/X`、`/x` | **不上板** | RULE1 會查（BOM 點了它就是一筆不一致）；RULE2 不查（本來就不上板，BOM 不列是對的） |
+| 空白、`N/A` | **上板** | RULE2 要求 BOM 必須有這一行 |
+| 其他任何值 | 兩條規則**都不碰** | 報告結尾會說有幾顆 |
+
+`DNI`、`option B`、某人打的一段備註 —— 這些是本工具沒被教過怎麼讀的句子，**猜哪一邊都更糟**：當成上板，RULE2 會去要一行可能根本不該存在的 BOM；當成不上板，RULE1 會去指控一份正確的 BOM。所以留著不動，但**數出來講**，免得「沒有發現」被讀成「全部都查過了」。值會去頭尾空白、不分大小寫。
+
+### RULE1 — BOM 有，設計沒放或標了 `/X`
+
+```
+BOM_Consistency_Check_RULE1 - Part Reference in the BOM, not fitted in the design
+   (the BOM's reference exists, but DSN mark not populated)
+----------------------------------------------------------------
+  CP701            not in the design                  BOM sheet "BOM" row 182
+  R455             in the design but marked "/X"      BOM sheet "BOM" row 349
+                     SCH1 / P12. LAN
+  ORN1             in the design but marked "/X"      BOM sheet "BOM" row 77
+                     ORN1A          SCH1 / P03. DDR
+                     ORN1B          SCH1 / P04. DDR
+
+  -> 1 not in the design, 2 marked "/X" - 3 Part Reference(s) the BOM calls for and the design does not fit
+```
+
+- **一個位號一筆，不是一列一筆。** 同一個位號在 BOM 出現三列是同一件事，引用第一次出現的那一列，還找得回工作表。
+- 「沒放」跟「放了但標 `/X`」**分開列、分開標**：那是兩段對話、對的是兩個人（一個找 BOM 的主人，一個找把料標掉的人），混在一起列等於叫讀的人做報告該做的事。
+- **上不上板看的是所有 placement。** `ORN1A` 上板、`ORN1B` 標 `/X` → 這顆封裝還是上板，BOM 那行是對的，不報。只有**每一個 placement 都是 `/X`** 才報。混合的那些只計數、不列出：多 part 封裝出現這種情形是常態，不是錯。
+
+```
+  (4 BOM reference(s) have one placement fitted and another "/X" - fitted, so not reported)
+```
+
+沒問題時：`BOM_Consistency_Check_RULE1: No mis-matching Part Reference found.`
+
+### RULE2 — 設計會上板，BOM 沒列
+
+```
+BOM_Consistency_Check_RULE2 - fitted part in the design, not in the BOM
+   (the DSN exists but not appear in xlsx BOM)
+----------------------------------------------------------------
+  PU12             Optional ""      SCH1 / P07. PCIE
+  ORN7             Optional ""      2 placement(s):
+                     ORN7A          SCH1 / P03. DDR
+                     ORN7B          SCH1 / P05. DDR
+
+  -> 2 fitted Reference Designator(s) not found in the BOM, over 3 placement(s)
+```
+
+**一個 Reference Designator 一筆，placement 列在它底下。**「`ORN7` 不在 BOM 裡」是一件事實、一顆要買的料，四個 section 報四次正是搬到 Reference Designator 要消掉的雜訊。placement 還是印出來，因為那是要去翻的地方 —— section 名加頁名，一行一個。同一個位號在同一頁重複收到（同一頁被兩個 occurrence 走到）只算一個 placement。
+
+沒問題時：`BOM_Consistency_Check_RULE2: No mis-matching Part Reference found.`
+
+#### 跳過清單 `mBomCsSkipPrefix`
+
+RULE2 **不去問** BOM 的那些位號前綴，預設 `VT`：
+
+```tcl
+lappend ::mUtilMenu::mBomCsSkipPrefix TP   ;# 加一個前綴
+set ::mUtilMenu::mBomCsSkipPrefix {}       ;# 全部都查
+```
+
+VT 這類東西放在設計裡但沒人會去買，「設計有、BOM 沒有」對它們每一顆都成立、而且什麼都沒說 —— 一整區永遠在的發現，把真正該看的擠出第一個畫面。
+
+**兩個條件都要成立**才跳過：前綴相符（不分大小寫，比的是 **Part Reference**），**而且封裝是單 part（`Pkg 0`）**。只看前綴會連真的是元件的 VT-something 一起消音；`Pkg` 是 `-`（資料庫沒答）**不算 0**，不跳 —— 一個在資料庫沉默時照樣生效的排除會悄悄長大。**RULE1 完全不受影響**：BOM 列了一顆 VT 就是做了一個主張，主張還是要查。
+
+跳掉什麼會數出來、點名出來：
+
+```
+  (87 fitted part(s) not looked up - single-part package and the Part Reference starts with VT: VT1, VT2, VT3, VT4, VT5, VT6, ...)
+```
+
+看不見的排除就是沒人能發現它壞掉的排除 —— 「沒有發現」前面默默丟掉兩百顆料，跟「沒有發現」不是同一句話。
+
+### 位號怎麼算相符
+
+預設**完全相同**（只是不分大小寫）—— `R1` 跟 `r1` 是同一個位號，字串其他部分一律不動。多 part 封裝已經由 Reference Designator 處理掉了，沒有字母要砍、沒有東西要猜。
+
+`mBomCsPlacement 1` 會額外接受設計側多**一個** A–Z（BOM `R21` ↔ 設計 `R21A`..`R21D`，跟 BOM Footprint Check 同一套規則）。留給資料庫答不出來的那種情況：設計裡 `R21A`／`R21B` 是兩顆**各自封裝**的料，而 BOM 只寫一行 `R21`。Capture 把它們當兩個元件是對的，BOM 合成一行買也不算錯，**只有讀 BOM 的人說得準這份 BOM 是哪個意思** —— 所以是開關，不是規則。
+
+字母**只從設計那一側砍**：BOM 寫 `R21C`、設計只有 `R21` → 不相符。BOM 負責點名、設計負責擺放。這個開關**只影響 BOM Consistency Check**；BOM Footprint Check 本來就建立在後綴規則上，不看它。
+
+---
+
+## 5. Close Page — 收乾淨但留住 Project Manager
 
 比對或檢查跑過一輪之後，Capture 裡常常開了幾十個頁面分頁。Close Page 走訪 session 裡每一個設計，關掉頁面、**保留 Project Manager**，原本作用中的專案結束後仍是作用中。
 
@@ -437,6 +606,8 @@ set ::mUtilMenu::mRule4MarkMinPins 5
 | `mBomRefCol` | `K` | BOM 位號欄，逗號分隔 |
 | `mBomSizes` | `0201 0402 0603 0805 1206 1210` | 認得的包裝尺寸。以子字串比對描述欄 |
 | `mBomMaxRows` | `0` | BOM Footprint Check 每張工作表最多印幾列。`0` = 全印，設成正整數後超出的部分印 `+N more` |
+| `mBomCsPlacement` | `0` | BOM Consistency Check 的位號比對：`0` = 要完全相同，`1` = 設計側可多一個 A–Z |
+| `mBomCsSkipPrefix` | `VT` | BOM Consistency Check RULE2 不去問 BOM 的位號前綴（且封裝須為單 part）。清空代表全部都查 |
 | `mClosePageMode` | `perdesign` | Close Page 的模式 |
 | `mTimeCompare` | `1` | 印出比對各階段耗時 |
 | `mQuiet` | `0` | 1 = 不把 dump 印進 Command Window |
