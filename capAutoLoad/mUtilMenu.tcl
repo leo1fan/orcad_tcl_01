@@ -66,6 +66,50 @@
 #                          does have the 8.6 core's "zlib inflate".  See the BOM
 #                          Footprint Check block, and read the note on Tcl
 #                          greediness in it before touching any pattern there.
+#     BOM Consistency Check -> Tk dialog: one .xlsx field + Browse, Execute /
+#                          Close.  Close does nothing.  Execute asks whether the
+#                          BOM and the design agree on WHAT IS ON THE BOARD, in
+#                          both directions, and answers in a read-only text
+#                          window that can be selected and copied.
+#                          SCOPE: a schematic (_DboSchematic) or the Design
+#                          (.DSN) in PROJECT_MANAGER_VIEW.  Anything else - a
+#                          page, the .OPJ, nothing selected - says which and
+#                          closes without running.
+#                            RULE1  BOM -> design.  Every Part Reference the BOM
+#                              names must be placed in the design AND not marked
+#                              Optional "/X" or "/x".  Missing ones and
+#                              not-fitted ones are listed separately, each with
+#                              the BOM sheet and row it came from.
+#                            RULE2  design -> BOM.  Every part the design FITS -
+#                              Optional "" or "N/A" - must appear in the BOM.
+#                              The ones that do not are listed once each, with
+#                              their placements under them.
+#                          COMPARED ON THE REFERENCE DESIGNATOR - the design's
+#                          ORN1, not its ORN1A / ORN1B.  A BOM lists components
+#                          and a component is a package, so the sections of a
+#                          multi-part package are one BOM line and one finding
+#                          between them.  The design side reads it from the
+#                          database (DboPlacedInst GetReferenceDesignator,
+#                          Appendix A p.529), not by stripping the letter off
+#                          the Part Reference; the Part Reference is still
+#                          collected and still printed, because it is what is
+#                          drawn on the page.
+#                          "/X" parts are not asked about by RULE2 (not fitted,
+#                          so the BOM is right to omit them), and an Optional
+#                          value that is none of "", "N/A", "/X" is read by
+#                          NEITHER rule - the report says how many there were.
+#                          RULE2 also SKIPS the mBomCsSkipPrefix references -
+#                          "VT" by default - when their package is single-part
+#                          (Pkg 0): placed in the design, never bought, so a
+#                          finding per part would be true and useless.  RULE1
+#                          still checks them, because a BOM that LISTS one has
+#                          made a claim.  What was skipped is counted and named
+#                          at the end of RULE2.
+#                          References match when they are equal, case aside;
+#                          mBomCsPlacement 1 also accepts one trailing A-Z on
+#                          the design side, which is NOT the multi-part case -
+#                          see the variable.
+#                          See the BOM Consistency Check blocks.
 #     Close Page        -> walks EVERY design the session has open, one at a
 #                          time, and closes that project's pages while leaving
 #                          its Project Manager standing.  The project that was
@@ -386,7 +430,7 @@ namespace eval ::mUtilMenu {
     # returns them, diag prints them - and deliberately nowhere else: a dump is
     # for reading schematic data, not for reading a byline, and the column
     # alignment in those dumps is worked out to the character.
-    variable mVersion "1.03"
+    variable mVersion "1.04"
     variable mAuthor  "LEO"
     variable mCompany "ASROCK"
 
@@ -1085,6 +1129,75 @@ namespace eval ::mUtilMenu {
     #              field cannot be Executed by accident; it says "choose one".
     variable mBomWin  ".mUtilBomCheck"
     variable mBomFile ""
+
+    # BOM Consistency Check - its own dialog, same shape as the one above: one
+    # .xlsx field with a Browse..., Execute / Close underneath.
+    #
+    # A WINDOW AND A FILE OF ITS OWN, not a second mode of the Footprint dialog.
+    # The two checks read the same workbook and ask completely different questions
+    # of it (footprint sizes there, Part Reference / Optional here), and the usual
+    # session has one of them open while the other's answer is still on screen.
+    # Sharing mBomFile would also mean the field a user is standing in front of
+    # could change under them because the other dialog was Browsed somewhere else.
+    #
+    # The FOLDER is shared, though - mBomInitDir, below.  Both of these are BOM
+    # files and they live in the same place; two anchors to the same folder would
+    # be two things to get out of step for no gain.
+    #
+    # Starts empty every session for the same reason mBomFile does: a BOM is
+    # revised more often than the design, so a restored path is most likely a
+    # superseded revision sitting one click away from Execute.
+    variable mBomCsWin  ".mUtilBomConsist"
+    variable mBomCsFile ""
+
+    # Does a BOM reference match a design reference that carries ONE extra A-Z
+    # letter - BOM "R21" against design "R21A".."R21D"?
+    #
+    #   0  no, the references must be equal (case aside).  THE DEFAULT.
+    #   1  yes, the same suffix rule BOM Footprint Check uses - see BomMatchRows.
+    #
+    # NOT WHAT HANDLES MULTI-PART PACKAGES ANY MORE, and that is why it can stay
+    # off.  ORN1A and ORN1B being sections of ORN1 is a fact the database holds,
+    # and the design side now reads it - CollectPageRefOptional asks
+    # GetReferenceDesignator, so by the time either rule runs the design says
+    # ORN1 and the BOM's ORN1 matches it exactly.  No letter to strip and nothing
+    # to guess.
+    #
+    # What is left for it is the case the database CANNOT answer: a design where
+    # the letter is part of the Reference Designator itself - two separately
+    # packaged parts annotated R21A and R21B - against a BOM that names R21 once.
+    # Capture is right to call those two components, the BOM is not wrong to buy
+    # them as one line item, and only the person reading the BOM can say which
+    # way this particular BOM meant it.  Hence a switch and not a rule.
+    #
+    # Affects BOM Consistency Check alone.  BOM Footprint Check always applies the
+    # suffix rule - that check is built around it - and does not consult this.
+    variable mBomCsPlacement 0
+
+    # Part Reference prefixes RULE2 does not ask the BOM about, when the part is
+    # in a SINGLE-PART package (PartPkgKind 0).
+    #
+    # "VT" is what this was asked for: those parts are placed in the design and
+    # are not line items anybody buys, so "fitted in the design, not in the BOM"
+    # is true of every one of them and says nothing - a standing block of
+    # findings that pushes the real ones off the first screen.
+    #
+    # BOTH HALVES OF THE TEST MATTER.  The prefix alone would silence a genuine
+    # VT-something that IS a component, and the single-part condition is what
+    # keeps the exclusion to the kind of object it was meant for; a multi-part
+    # package whose reference starts with VT is still asked about.  RULE1 is not
+    # affected at all - a BOM that LISTS a VT part is making a claim, and that
+    # claim is still checked.
+    #
+    # A LIST, matched case-insensitively against the start of the Part
+    # Reference, so another prefix is one lappend from the Command Window:
+    #
+    #     lappend ::mUtilMenu::mBomCsSkipPrefix TP
+    #
+    # Whatever it skips is counted and named in the report - an exclusion nobody
+    # can see is one nobody can tell is wrong.  Empty the list to check
+    # everything.
+    variable mBomCsSkipPrefix [list "VT"]
 
     # Where BOM File's Browse... starts, remembered between sessions under its OWN
     # label in mUtilMenu.cfg - "mBomInitDir", beside mCmpInitDir and separate from
@@ -11733,6 +11846,459 @@ proc ::mUtilMenu::DumpDesignRefFp { pPairs pScope } {
     return $lAll
 }
 
+#-----------------------------------------------------------------------------
+# The DESIGN side for BOM Consistency Check - Reference Designator and Optional
+#
+# IT IS THE REFERENCE DESIGNATOR THAT IS COMPARED, NOT THE PART REFERENCE, and
+# the difference is the whole of what a multi-part package is:
+#
+#   Part Reference        ORN1A, ORN1B    one per SECTION drawn on a page
+#   Reference Designator  ORN1            one per PACKAGE - the component that
+#                                         gets bought, placed and netlisted
+#
+# A BOM lists components, so ORN1 is what a BOM line says and ORN1A is not.
+# Comparing Part References made every section of every multi-part package read
+# as a part the BOM had never heard of.
+#
+# WHERE IT COMES FROM.  The database, not the string: DboPlacedInst's
+# GetReferenceDesignator (Appendix A p.529), the same object the properties are
+# read off.  Stripping a trailing letter off "ORN1A" was the other way to get
+# there and it is wrong three ways - R21 against R210, a designator that simply
+# ends in a letter, and a package numbered "ORN1-1" rather than "ORN1A", which
+# carries no letter to strip.  Capture knows which of its parts are sections of
+# one package; it is the only thing that does.
+#
+#   GetReferenceDesignator   ORN1   p.529
+#   GetDeviceDesignator      A      p.529 - which section this one is
+#   GetPackage -> GetSize           p.595 - how many sections the package has
+#
+# THE PART REFERENCE IS STILL COLLECTED, and still printed.  It is what is drawn
+# on the page and what the reader has to search for to find the thing, so a
+# finding that named only "ORN1" would be a finding they then have to go and
+# translate.  It is carried to the end of the row so that index 0 stays "the
+# thing both rules compare on" - see DumpDesignRefFp, whose rows start the same
+# way, and BomIndexDesign, which keys on index 0 for both checks.
+#
+# NOT VERIFIED AGAINST A REAL DESIGN YET - there is no Capture in the loop here,
+# so GetReferenceDesignator comes from the API listing and the PDF rather than
+# from a run.  Hence the fallback below and the count DumpDesignRefOptional
+# prints: the first real run says in one line how many parts came back with a
+# Reference Designator that differs from their Part Reference, which on a design
+# with ORN1A/ORN1B in it must not be zero.
+#-----------------------------------------------------------------------------
+
+# Is pRefDes believable as the package reference of a part drawn as pPartRef?
+#
+# WHY THIS EXISTS.  A Reference Designator is what GROUPS parts: every part
+# reporting ORN1 is one component, asked about once.  So a value that is wrong in
+# the direction of being SHARED does not merely mislabel one part, it welds
+# several unrelated parts into one finding - three parts SU1, SQ4 and SRN1 on one
+# page reported as a single entry nobody can act on, with the three real
+# questions ("is SU1 in the BOM?") never asked at all.  That is the failure this
+# refuses, and refusing costs only the package grouping for the parts concerned.
+#
+# WHAT COUNTS AS BELIEVABLE.  A section's Part Reference is its package's
+# Reference Designator plus the part's own designator, in one of the two forms
+# Capture numbers packages with:
+#
+#   equal            R6     -> R6        an ordinary one-part package
+#   alphabetic       ORN1   -> ORN1A     A..Z, the usual form
+#   numeric          ORN1   -> ORN1-2    "Part Numbering: Numeric"
+#
+# Anything else - a value that is not a prefix of the Part Reference at all, or
+# one whose remainder is a whole designator rather than a part letter ("S" for
+# SU1, SQ4 and SRN1) - is not this part's package and is dropped.
+#
+# ONE LETTER, and the numeric form needs its dash: "ORN1" against "ORN12" must
+# fail, or every designator would absorb its own higher-numbered neighbours.
+proc ::mUtilMenu::BomRefDesPlausible { pRefDes pPartRef } {
+    if { $pRefDes eq "" || $pPartRef eq "" } {
+        return 0
+    }
+    if { [string equal -nocase $pRefDes $pPartRef] } {
+        return 1
+    }
+    set lLen [string length $pRefDes]
+    if { ![string equal -nocase $pRefDes [string range $pPartRef 0 [expr { $lLen - 1 }]]] } {
+        return 0
+    }
+    set lTail [string range $pPartRef $lLen end]
+    return [expr { [regexp {^[A-Za-z]$} $lTail] || [regexp {^-[0-9]+$} $lTail] }]
+}
+
+# What kind of package this placed part belongs to, as the one digit the dump
+# shows.  "-" when the database would not say.
+#
+#   0  single-part package     one part per package - R6, U3, most of a board
+#   1  multi-part, homogeneous  several IDENTICAL parts - a quad NAND's A..D, a
+#                               resistor network's sections.  GetSize > 1 and
+#                               IsHomogeneous.
+#   2  multi-part, heterogeneous  several DIFFERENT parts - a relay's coil and
+#                               its contacts, a connector split into blocks.
+#                               GetSize > 1 and not IsHomogeneous.
+#
+# Both come off the DboPackage the part belongs to - GetPackage (p.529), then
+# GetSize and IsHomogeneous (p.595).  The package is a database object owned by
+# the design, not a helper value, so there is nothing to release here; the
+# DboState is the caller's and is released with the walk.
+#
+# "-" IS A REAL ANSWER and not a failure to be papered over: it means this part
+# has no package to ask, or the two calls did not answer. The one thing it must
+# not do is read as 0 - "I asked and it is a single-part package" and "I could
+# not ask" are different facts, and the second is the one that explains a
+# Reference Designator that makes no sense.
+#
+# Failure anywhere in the middle leaves "-" rather than a half-decided digit:
+# the catch wraps the whole decision, and lKind is only assigned once the branch
+# it belongs to has been reached.
+proc ::mUtilMenu::PartPkgKind { pPart pStatus } {
+    set lNullObj NULL
+    set lKind "-"
+
+    catch {
+        set lPkg [$pPart GetPackage $pStatus]
+        if { $lPkg != $lNullObj } {
+            set lSize [$lPkg GetSize $pStatus]
+            if { [string is integer -strict $lSize] } {
+                if { $lSize <= 1 } {
+                    set lKind 0
+                } elseif { [$lPkg IsHomogeneous $pStatus] } {
+                    set lKind 1
+                } else {
+                    set lKind 2
+                }
+            }
+        }
+    }
+    return $lKind
+}
+
+# The package-level reference for one placed part - PQ31 for a part drawn as
+# PQ31A - as {refDes source note}.
+#
+# FOUR SOURCES, IN ORDER, first one that survives the test:
+#
+#   1 "Reference"            the Capture property.  Read exactly the way the
+#     property               shipped DRC capPartReferencePrefixMismatch.tcl:33
+#                            reads it - GetEffectivePropStringValue "Reference" -
+#                            which is what PropStr does.
+#   2 GetReferenceDesignator the DboPlacedInst call (Appendix A p.529).
+#   3 derived                PQ31A -> PQ31, by removing the part designator the
+#                            package numbering added.  ONLY when the PACKAGE
+#                            says this part is one of several (PartPkgKind 1 or
+#                            2), which is the whole reason it is safe: the
+#                            database has already said there is a designator on
+#                            the end, so taking it off is reading the name, not
+#                            guessing at it.  Both of Capture's numbering forms
+#                            are undone - alphabetic (PQ31A) and numeric
+#                            (PQ31-2).
+#   4 the Part Reference     unchanged.  Nothing above answered, so this part is
+#                            compared under its own name - what this check did
+#                            before packages were read at all.
+#
+# TWO TESTS EVERY CANDIDATE HAS TO PASS:
+#
+#   BomRefDesPlausible   it has to be able to BE this part's package reference -
+#                        see there for the shapes, and for what a shared value
+#                        like "S" over SU1/SQ4/SRN1 would do if let through.
+#   not equal to the     ON A MULTI-PART PACKAGE ONLY.  A section's package
+#   Part Reference       reference is strictly shorter than its own name, so a
+#                        source handing back PQ31A for a part the package says is
+#                        a section has not answered the question - it has
+#                        repeated the Part Reference.  That is exactly what a
+#                        real run showed (Pkg 1, RefDes PQ31A), and rejecting it
+#                        is what lets source 3 produce PQ31.
+#                        Not applied when the package says single-part: there
+#                        the two SHOULD be equal, and R6 = R6 is the answer.
+#
+# note carries the first candidate that was turned away, with where it came
+# from, so the dump can say what the database actually returned.  Empty when
+# nothing was rejected.
+proc ::mUtilMenu::PartRefDes { pPart pPartRef pKind } {
+    set lMulti [expr { $pKind eq "1" || $pKind eq "2" }]
+    set lNote  ""
+
+    foreach lTry [list \
+            [list "Reference" [::mUtilMenu::PropStr $pPart "Reference"]] \
+            [list "RefDesAPI" [::mUtilMenu::CStr    $pPart GetReferenceDesignator]]] {
+        set lWho  [lindex $lTry 0]
+        set lCand [string trim [lindex $lTry 1]]
+        if { $lCand eq "" } {
+            continue
+        }
+        if { ![::mUtilMenu::BomRefDesPlausible $lCand $pPartRef] } {
+            if { $lNote eq "" } {
+                set lNote "$lWho \"$lCand\""
+            }
+            continue
+        }
+        if { $lMulti && [string equal -nocase $lCand $pPartRef] } {
+            if { $lNote eq "" } {
+                set lNote "$lWho \"$lCand\" (= Part Reference, but the package says multi-part)"
+            }
+            continue
+        }
+        return [list $lCand $lWho $lNote]
+    }
+
+    if { $lMulti } {
+        set lStem ""
+        if { [regexp {^(.*[0-9])[A-Za-z]$}   $pPartRef -> lStem] \
+          || [regexp {^(.*[0-9])-[0-9]+$}    $pPartRef -> lStem] } {
+            if { $lStem ne "" } {
+                return [list $lStem "derived" $lNote]
+            }
+        }
+    }
+    return [list $pPartRef "PartRef" $lNote]
+}
+
+# One page's placed parts, as {referenceDesignator optional partReference note
+# pkgKind refDesSource} rows.  note and refDesSource are PartRefDes's, and
+# DumpDesignRefOptional is the only thing that reads them - they are there so the
+# dump can say where each Reference Designator came from and what was turned
+# away.  pkgKind is PartPkgKind's 0 / 1 / 2 / "-".
+#
+# TWO WAYS THE PART REFERENCE IS USED INSTEAD, both per-part and both deliberate:
+#
+#   nothing came back       an older database, a part with no package, an API
+#                           that does not answer as documented
+#   what came back is not   see BomRefDesPlausible - the value would have grouped
+#   this part's package     parts that are not one component
+#
+# Degraded in both cases, and still a comparison: that part is asked about under
+# its own name, which is what this check did before packages were read at all.
+# The alternative - trusting it, or dropping the part - is either a wrong answer
+# or no answer.
+proc ::mUtilMenu::CollectPageRefOptional { pPage } {
+    set lStatus  [DboState]
+    set lNullObj NULL
+    set lRows    [list]
+
+    catch {
+        set lIter [$pPage NewPartInstsIter $lStatus]
+        set lInst [$lIter NextPartInst $lStatus]
+        while { $lInst != $lNullObj } {
+            # Placed instances only - a drawn instance is a hierarchical block and
+            # has no Part Reference, the same reason CollectPageRefFp skips them.
+            if { [$lInst GetObjectType] == $::DboBaseObject_PLACED_INSTANCE } {
+                set lPart [DboPartInstToDboPlacedInst $lInst]
+                set lRef  [::mUtilMenu::PropStr $lPart "Part Reference"]
+
+                # The package first: PartRefDes needs to know whether this part
+                # is a section before it can judge a candidate that equals the
+                # Part Reference, and before it may take a designator off the end.
+                set lKind [::mUtilMenu::PartPkgKind $lPart $lStatus]
+                set lRd   [::mUtilMenu::PartRefDes $lPart $lRef $lKind]
+
+                lappend lRows [list \
+                    [lindex $lRd 0] \
+                    [::mUtilMenu::PropStr $lPart "Optional"] \
+                    $lRef \
+                    [lindex $lRd 2] \
+                    $lKind \
+                    [lindex $lRd 1]]
+            }
+            set lInst [$lIter NextPartInst $lStatus]
+        }
+        catch { delete_DboPagePartInstsIter $lIter }
+    }
+    catch { $lStatus -delete }
+    return $lRows
+}
+
+# Print every page's parts under one scope, and RETURN them as
+# {referenceDesignator optional schematicName pageName partReference pkgKind}
+# rows - the design half of both consistency rules.
+#
+# Index 0 is the REFERENCE DESIGNATOR (ORN1), which is what both rules compare
+# and what BomIndexDesign keys on; the Part Reference (ORN1A) rides along at
+# index 4 for the report to name.  See CollectPageRefOptional for why the
+# comparison moved off the Part Reference.
+#
+# Index 5 is PartPkgKind's 0 / 1 / 2 / "-".  It is in the row because RULE2's
+# skip list needs it - mBomCsSkipPrefix only excludes a part when its package is
+# single-part - and a report that had to ask the database again for something
+# this walk already read would be a second walk of the design.
+#
+# Optional is printed through OrDash, so a part that does not carry the property
+# at all shows "-" and not an empty column.  THE DASH IS A DISPLAY DECISION ONLY:
+# the returned row keeps the empty string, because "" is one of the two values
+# rule 2 selects on and turning it into "-" here would make that rule match
+# nothing.
+#
+# Sorted by reference within a page, dictionary order (R2 before R10); page order
+# is left as the design gives it, so the report reads down the Project Manager
+# tree.  Same as DumpDesignRefFp, and for the same reasons.
+proc ::mUtilMenu::DumpDesignRefOptional { pPairs pScope } {
+    ::mUtilMenu::Out "================================================================"
+    ::mUtilMenu::Out [::mUtilMenu::Banner "BOM Consistency Check - design side"]
+    ::mUtilMenu::Out "================================================================"
+    ::mUtilMenu::Out [format "  %-16s %s" "scope" $pScope]
+    ::mUtilMenu::Out [format "  %-16s %s" "pages" [llength $pPairs]]
+
+    # Reference Designator first: it is the one being compared, and a dump whose
+    # first column is not the one the findings are about is a dump the reader has
+    # to re-read.  The Part Reference sits beside it, and the two agree on every
+    # ordinary part - the lines where they differ are the sections of multi-part
+    # packages, which is exactly what this is for.
+    #
+    # Pkg is the package KIND, straight from the database rather than inferred
+    # from the two columns before it, which is what makes it worth a column: it
+    # is the independent answer to "is this part one of several in a package",
+    # and it agrees or disagrees with the RefDes/Part Reference pair in plain
+    # sight.  A part showing Pkg 1 or 2 whose two references are identical is a
+    # section whose Reference Designator did not come through; a part showing
+    # Pkg 0 whose references differ is the opposite mistake.  See PartPkgKind.
+    ::mUtilMenu::Out ""
+    ::mUtilMenu::Out "  Pkg: 0 = single-part package, 1 = multi-part homogeneous, 2 = multi-part heterogeneous, - = not available"
+    ::mUtilMenu::Out "  RefDes: no tag = from the \"Reference\" property or GetReferenceDesignator; \"derived\" = the part designator taken off the Part Reference, which only a multi-part Pkg allows"
+    ::mUtilMenu::Out [format "  %-16s %-16s %-4s %s" "RefDes" "Part Reference" "Pkg" "Optional"]
+
+    set lAll [list]
+    array set lSeen {}
+    array set lPartSeen {}
+    set lX       0
+    set lOpen    0
+    set lMulti   0
+    set lRejects 0
+    set lSample  [list]
+    array set lKindN { 0 0 1 0 2 0 - 0 }
+    array set lSrcN  { Reference 0 RefDesAPI 0 derived 0 PartRef 0 }
+
+    foreach lPair $pPairs {
+        set lSch  [lindex $lPair 0]
+        set lPage [lindex $lPair 1]
+
+        set lSchName  ""
+        set lPageName ""
+        catch { set lSchName  [::mUtilMenu::CStr $lSch  GetName] }
+        catch { set lPageName [::mUtilMenu::CStr $lPage GetName] }
+
+        ::mUtilMenu::Out ""
+        ::mUtilMenu::Out "---- [::mUtilMenu::OrDash $lSchName] / [::mUtilMenu::OrDash $lPageName] ----"
+
+        set lRows [::mUtilMenu::CollectPageRefOptional $lPage]
+        foreach lRow [lsort -dictionary -index 0 $lRows] {
+            set lRef  [lindex $lRow 0]
+            set lOpt  [lindex $lRow 1]
+            set lPart [lindex $lRow 2]
+
+            if { [::mUtilMenu::BomOptionalIsX $lOpt] } {
+                incr lX
+            } elseif { [::mUtilMenu::BomOptionalIsFitted $lOpt] } {
+                incr lOpen
+            }
+            if { $lRef ne "" } {
+                set lSeen($lRef) 1
+            }
+            if { $lPart ne "" } {
+                set lPartSeen($lPart) 1
+            }
+            if { $lRef ne $lPart } {
+                incr lMulti
+            }
+
+            # Where this line's RefDes came from, and what was turned away to get
+            # there - both on the part's own line, which is where a reader is
+            # already looking.  The summary below carries the counts and a
+            # sample.
+            #
+            # A RefDes that came from the "Reference" property or the API is not
+            # remarked on: that is the ordinary case and a tag on every line
+            # would bury the two that matter.
+            set lRaw [lindex $lRow 3]
+            set lSrc [lindex $lRow 5]
+            if { ![info exists lSrcN($lSrc)] } {
+                set lSrc "PartRef"
+            }
+            incr lSrcN($lSrc)
+
+            set lNote ""
+            if { $lSrc eq "derived" } {
+                append lNote "   <- derived"
+            }
+            if { $lRaw ne "" } {
+                incr lRejects
+                append lNote "   <- ignored $lRaw"
+                if { [llength $lSample] < 5 \
+                     && [lsearch -exact $lSample "$lRaw on $lPart"] < 0 } {
+                    lappend lSample "$lRaw on $lPart"
+                }
+            }
+
+            # Anything PartPkgKind did not produce counts as "-", so the four
+            # counters below always add up to the part count however odd the
+            # value is.
+            set lKind [lindex $lRow 4]
+            if { ![info exists lKindN($lKind)] } {
+                set lKind "-"
+            }
+            incr lKindN($lKind)
+
+            ::mUtilMenu::Out [format "  %-16s %-16s %-4s %s%s" \
+                [::mUtilMenu::OrDash $lRef] [::mUtilMenu::OrDash $lPart] \
+                $lKind [::mUtilMenu::OrDash $lOpt] $lNote]
+            lappend lAll [list $lRef $lOpt $lSchName $lPageName $lPart $lKind]
+        }
+        ::mUtilMenu::Out "  -> [llength $lRows] part(s)"
+    }
+
+    ::mUtilMenu::Out ""
+    ::mUtilMenu::Out "  -> [llength $lAll] part(s) over [llength $pPairs] page(s), [array size lSeen] distinct Reference Designator(s), [array size lPartSeen] distinct Part Reference(s)"
+    ::mUtilMenu::Out "  -> $lX marked \"/X\" (not fitted), $lOpen with Optional empty or \"N/A\" (fitted)"
+
+    # THE LINE THAT SAYS THE PACKAGE LOOKUP IS WORKING.  Every section of a
+    # multi-part package has a Reference Designator that differs from its Part
+    # Reference - ORN1 against ORN1A - so on a design that has any, this is not
+    # zero.  Zero on a design known to contain ORN1A/ORN1B means
+    # GetReferenceDesignator did not answer and every part fell back to its Part
+    # Reference: the comparison still runs, but it is the old one, and the BOM's
+    # ORN1 lines will come back as "not in the design".
+    ::mUtilMenu::Out "  -> Pkg: $lKindN(0) single-part, $lKindN(1) multi-part homogeneous, $lKindN(2) multi-part heterogeneous, $lKindN(-) not available"
+
+    # WHICH SOURCE ANSWERED, over the whole scope.  The four add up to the part
+    # count, and between them they say how this design keeps its package
+    # references - which is the thing no amount of reading the API list settles.
+    ::mUtilMenu::Out "  -> RefDes from: $lSrcN(Reference) \"Reference\" property, $lSrcN(RefDesAPI) GetReferenceDesignator, $lSrcN(derived) taken off the Part Reference, $lSrcN(PartRef) left as the Part Reference"
+
+    if { $lMulti > 0 } {
+        ::mUtilMenu::Out "  -> $lMulti part(s) are a section of a multi-part package (RefDes differs from Part Reference)"
+    } else {
+        ::mUtilMenu::Out "  -> no multi-part package sections found (every RefDes equals its Part Reference)"
+    }
+
+    # THE TWO ANSWERS CROSS-CHECKED.  The line above counts sections by what the
+    # references look like; the Pkg column counts them by what the package says.
+    # They should agree, and when they do not it is the Reference Designator that
+    # is wrong - the package is not something this check infers.  Said out loud
+    # because the two numbers are twenty lines apart and nobody subtracts them.
+    set lPkgMulti [expr { $lKindN(1) + $lKindN(2) }]
+    if { $lPkgMulti != $lMulti } {
+        ::mUtilMenu::Out "  -> NOTE: the package says $lPkgMulti part(s) are in a multi-part package, the references say $lMulti - the Reference Designator is not being read correctly for the difference"
+    }
+
+    # THE LINE TO PASTE BACK WHEN THE GROUPING LOOKS WRONG.  Each of these is a
+    # part whose Reference Designator could not be its package's - see
+    # BomRefDesPlausible - so it was compared under its own Part Reference
+    # instead.  A large count here means the database is not answering the way
+    # this check assumes, and the sample is what says what it IS answering.
+    if { $lRejects > 0 } {
+        ::mUtilMenu::Out "  -> $lRejects part(s) had a Reference Designator turned away - what replaced it is that part's RefDes column and the tag beside it"
+        ::mUtilMenu::Out "     sample: [join $lSample {, }]"
+    }
+
+    # Same note DumpDesignRefFp makes, and it means more here, in two ways: the
+    # sections of one package SHARE a Reference Designator by definition - ORN1A
+    # and ORN1B are both ORN1 - and a designator can also be placed twice by
+    # accident.  Both rules take every placement into account rather than the
+    # first one found, which is what makes the first case harmless.
+    if { [llength $lAll] != [array size lSeen] } {
+        ::mUtilMenu::Out "  -> NOTE: [expr { [llength $lAll] - [array size lSeen] }] part(s) share a Reference Designator with another part (sections of multi-part packages, or a designator placed twice)"
+    }
+    return $lAll
+}
+
 # What the Project Manager has selected, as {kind scopeLabel pairs}, or a 1-element
 # {""} when it is not something this item can run on.
 #
@@ -11753,7 +12319,20 @@ proc ::mUtilMenu::DumpDesignRefFp { pPairs pScope } {
 # clicking a page inside a selected design mean the page.  Refactoring it to serve
 # a third caller that wants the OPPOSITE answer for a page would put all of that
 # at risk to save thirty lines.
-proc ::mUtilMenu::BomCheckScope { } {
+#
+# TWO PARAMETERS, both so BOM Consistency Check can use this without a copy:
+#
+#   pLabel  what the message boxes and the Command Window call the check.  Every
+#           refusal here is a dead end for the user, and a box titled with the
+#           wrong check is a box about something they did not run.
+#   pKinds  which scopes this caller accepts, narrowest first - the same list the
+#           "narrowest wins" loop walks, so it is also the preference order.
+#           BOM Footprint Check takes all three; BOM Consistency Check takes
+#           {schematic design} only, because it was asked to run on a
+#           _DboSchematic or a .DSN and nothing else.  A kind left out of the
+#           list is refused exactly the way a page is.
+proc ::mUtilMenu::BomCheckScope { {pLabel "BOM Footprint Check"} \
+                                  {pKinds {schematic design project}} } {
     set lItems [list]
     set lAsked 1
     if { [catch { set lItems [GetSelectedPMItems] } lErr] } {
@@ -11777,16 +12356,33 @@ proc ::mUtilMenu::BomCheckScope { } {
         }
     }
 
+    # "a schematic, the Design (.DSN) or the Project (.OPJ)" - built from pKinds so
+    # a caller that does not accept .OPJ never tells anyone to click one.
+    set lWant [list]
+    foreach lKind $pKinds {
+        switch -- $lKind {
+            schematic { lappend lWant "a schematic" }
+            design    { lappend lWant "the Design (.DSN)" }
+            project   { lappend lWant "the Project (.OPJ)" }
+            default   { lappend lWant "a $lKind" }
+        }
+    }
+    if { [llength $lWant] > 1 } {
+        set lWantStr "[join [lrange $lWant 0 end-1] {, }] or [lindex $lWant end]"
+    } else {
+        set lWantStr [lindex $lWant 0]
+    }
+
     if { [llength $lHits] == 0 } {
         if { !$lAsked } {
             set lMsg "Could not read the Project Manager selection.\n\nIs a project open, and is PROJECT_MANAGER_VIEW the active window?"
         } elseif { [llength $lItems] == 0 } {
-            set lMsg "Nothing is selected in the Project Manager.\n\nClick a schematic, the Design (.DSN) or the Project (.OPJ) and try again."
+            set lMsg "Nothing is selected in the Project Manager.\n\nClick $lWantStr and try again."
         } else {
-            set lMsg "The Project Manager selection is not a schematic, a Design or a Project.\n\nSelected:  [join $lItems {, }]"
+            set lMsg "The Project Manager selection is not $lWantStr.\n\nSelected:  [join $lItems {, }]"
         }
-        ::mUtilMenu::Out "BOM Footprint Check - nothing usable selected in the Project Manager"
-        catch { capDisplayMessageBox $lMsg "BOM Footprint Check" }
+        ::mUtilMenu::Out "$pLabel - nothing usable selected in the Project Manager"
+        catch { capDisplayMessageBox $lMsg $pLabel }
         return [list ""]
     }
 
@@ -11800,7 +12396,7 @@ proc ::mUtilMenu::BomCheckScope { } {
     # when there is nothing else - which is the case the refusal is about, and the
     # only one the Project Manager produces on a plain click anyway.
     set lPick ""
-    foreach lKind { schematic design project } {
+    foreach lKind $pKinds {
         foreach lHit $lHits {
             if { [lindex $lHit 0] eq $lKind } {
                 set lPick $lHit
@@ -11813,9 +12409,22 @@ proc ::mUtilMenu::BomCheckScope { } {
     }
 
     if { $lPick eq "" } {
-        set lMsg "A PAGE is selected in the Project Manager.\n\nBOM Footprint Check needs the whole design: a BOM lists the\nparts of the whole board, and checking it against one page\nwould report every part on the other pages as missing.\n\nClick the schematic, the Design (.DSN) or the Project (.OPJ)\nand try again."
-        ::mUtilMenu::Out "BOM Footprint Check - a PAGE is selected; this check needs a schematic, a Design or a Project"
-        catch { capDisplayMessageBox $lMsg "BOM Footprint Check" }
+        # What WAS selected, so the refusal names it.  A page is the usual case and
+        # has a reason of its own worth giving; with pKinds narrowed, a .OPJ lands
+        # here too, and telling that user "a PAGE is selected" would be a lie.
+        set lGot [list]
+        foreach lHit $lHits {
+            if { [lsearch -exact $lGot [lindex $lHit 0]] < 0 } {
+                lappend lGot [lindex $lHit 0]
+            }
+        }
+        if { [lsearch -exact $lGot page] >= 0 } {
+            set lMsg "A PAGE is selected in the Project Manager.\n\n$pLabel needs the whole design: a BOM lists the\nparts of the whole board, and checking it against one page\nwould report every part on the other pages as missing.\n\nClick $lWantStr\nand try again."
+        } else {
+            set lMsg "The Project Manager selection is [join $lGot {, }], which\n$pLabel cannot run on.\n\nClick $lWantStr\nand try again.\n\nSelected:  [join $lItems {, }]"
+        }
+        ::mUtilMenu::Out "$pLabel - [join $lGot {, }] selected; this check needs $lWantStr"
+        catch { capDisplayMessageBox $lMsg $pLabel }
         return [list ""]
     }
 
@@ -11849,8 +12458,8 @@ proc ::mUtilMenu::BomCheckScope { } {
         if { $lKind eq "project" && $lDsn eq "" } {
             append lMsg "\n\nA .OPJ names no design of its own, so the design the\nProject Manager has open is the one that would be used -\nand it did not report one.  Click the .DSN instead."
         }
-        ::mUtilMenu::Out "BOM Footprint Check - $lScope: no pages could be read"
-        catch { capDisplayMessageBox $lMsg "BOM Footprint Check" }
+        ::mUtilMenu::Out "$pLabel - $lScope: no pages could be read"
+        catch { capDisplayMessageBox $lMsg $pLabel }
         return [list ""]
     }
 
@@ -11899,7 +12508,14 @@ proc ::mUtilMenu::BomCheckScope { } {
 # Errors are NOT caught here.  The caller puts up a message box with whatever went
 # wrong, and a half-read workbook that printed two sheets and then said why it
 # stopped is more use than one that printed nothing.
-proc ::mUtilMenu::DumpBomFootprint { pPath } {
+#
+# pLabel only names the banner.  BOM Consistency Check reads the same column of
+# the same workbook and wants the same records - it just must not print a heading
+# claiming to be the other check.  The FOOTPRINT_SIZE column is still read and
+# still printed under either label: it costs one cell per row, it is what the
+# header line is declaring, and a second reader that skipped it would be a second
+# set of row-numbering rules to keep in step with this one for no gain.
+proc ::mUtilMenu::DumpBomFootprint { pPath {pLabel "BOM Footprint Check"} } {
     variable mBomMaxRows
     variable mBomFirstRow
     variable mBomRefCol
@@ -11909,7 +12525,7 @@ proc ::mUtilMenu::DumpBomFootprint { pPath } {
     set lN    [::mUtilMenu::ZipIndex $lData lZip]
 
     ::mUtilMenu::Out "================================================================"
-    ::mUtilMenu::Out [::mUtilMenu::Banner "BOM Footprint Check - [file tail $pPath]"]
+    ::mUtilMenu::Out [::mUtilMenu::Banner "$pLabel - [file tail $pPath]"]
     ::mUtilMenu::Out "================================================================"
     ::mUtilMenu::Out [format "  %-16s %s" "file"           [file nativename $pPath]]
     ::mUtilMenu::Out [format "  %-16s %s" "size"           "[string length $lData] byte(s)"]
@@ -12192,6 +12808,119 @@ proc ::mUtilMenu::BomMatchRows { pKey pArrName } {
     return $lOut
 }
 
+#-----------------------------------------------------------------------------
+# "Optional" - what the property means to BOM Consistency Check
+#
+# Two readings of one string, and everything else is neither:
+#
+#   "/X" or "/x"        NOT FITTED.  The part is drawn on the schematic but is
+#                       not placed on this build, so a BOM line calling for it is
+#                       a disagreement between the two documents.
+#   "" or "N/A"         FITTED.  Either nobody filled the property in or somebody
+#                       filled it in to say "no exception applies"; both mean the
+#                       part goes on the board, so it has to appear in the BOM.
+#
+# A value that is neither - "DNI", "option B", a note somebody typed - is left
+# ALONE BY BOTH RULES ON PURPOSE.  It is a statement this check has not been told
+# how to read, and guessing it either way would be worse than not answering: read
+# as fitted, rule 2 would demand a BOM line for a part that may well not be
+# built; read as not-fitted, rule 1 would accuse a BOM that is right.  The design
+# dump prints every value, so an unrecognised one is visible in the Command
+# Window rather than silently dropped.
+#
+# TRIMMED AND CASE-INSENSITIVE.  "/x", "/X" and " /X " are one value typed by
+# three people, and the request named the first two explicitly.
+#-----------------------------------------------------------------------------
+
+proc ::mUtilMenu::BomOptionalIsX { pOpt } {
+    return [string equal -nocase [string trim $pOpt] "/X"]
+}
+
+# Is this design part one RULE2 does not ask the BOM about?
+#
+# Both conditions, see mBomCsSkipPrefix: the Part Reference starts with one of
+# the listed prefixes AND the package is single-part.  pKind is PartPkgKind's
+# digit, so "-" - the package would not say - is NOT a 0 and does not skip: an
+# exclusion that fired when the database was silent would grow quietly every
+# time the package lookup had a bad day.
+#
+# The PART REFERENCE is what is tested, not the Reference Designator, because
+# the prefix is a naming convention of the thing drawn on the page.  On a
+# single-part package the two are the same string anyway - which is the only
+# case this can reach.
+proc ::mUtilMenu::BomCsSkipped { pPartRef pKind } {
+    variable mBomCsSkipPrefix
+
+    if { $pKind ne "0" } {
+        return 0
+    }
+    set lRef [string trim $pPartRef]
+    if { $lRef eq "" } {
+        return 0
+    }
+    foreach lPre $mBomCsSkipPrefix {
+        set lPre [string trim $lPre]
+        if { $lPre eq "" } {
+            continue
+        }
+        if { [string equal -nocase $lPre \
+                  [string range $lRef 0 [expr { [string length $lPre] - 1 }]]] } {
+            return 1
+        }
+    }
+    return 0
+}
+
+proc ::mUtilMenu::BomOptionalIsFitted { pOpt } {
+    set lOpt [string trim $pOpt]
+    return [expr { $lOpt eq "" || [string equal -nocase $lOpt "N/A"] }]
+}
+
+# The design rows one BOM reference matches, for BOM Consistency Check.
+#
+# EXACT by default - "Part Reference 要一樣" - and the uppercase key is the whole
+# of it: R1 and r1 are one designator, nothing else about the string is touched.
+# With mBomCsPlacement set, this is BomMatchRows instead and BOM R21 also finds
+# design R21A..R21D.  See the variable for why that is a setting and not a rule.
+proc ::mUtilMenu::BomConsistMatchRows { pKey pArrName } {
+    variable mBomCsPlacement
+    upvar 1 $pArrName lIdx
+
+    if { $mBomCsPlacement } {
+        return [::mUtilMenu::BomMatchRows $pKey lIdx]
+    }
+    if { [info exists lIdx($pKey)] } {
+        return $lIdx($pKey)
+    }
+    return [list]
+}
+
+# Is this DESIGN reference named by the BOM?  The mirror of the above, asked the
+# other way round, and the asymmetry is deliberate in the same place: with
+# mBomCsPlacement on, design R21C is covered by a BOM line for R21, so ONE
+# trailing A-Z is stripped and the stem tried as well.  The letter is only ever
+# stripped from the DESIGN side - a BOM line for R21C is not satisfied by a
+# design that places R21 - because the BOM names the part and the design places
+# it.
+proc ::mUtilMenu::BomHasRef { pKey pArrName } {
+    variable mBomCsPlacement
+    upvar 1 $pArrName lBom
+
+    if { [info exists lBom($pKey)] } {
+        return 1
+    }
+    if { !$mBomCsPlacement } {
+        return 0
+    }
+    # One letter, and a LETTER: R21C -> R21, but R210 stays R210 - the digit test
+    # is what keeps R2 from standing in for R21.
+    if { [regexp {^(.*[0-9])[A-Z]$} $pKey -> lStem] \
+         && [info exists lBom($lStem)] } {
+        return 1
+    }
+    return 0
+}
+
 # Does a PCB Footprint carry this package size?
 #
 # SUBSTRING, case-insensitive: the BOM says "0402" and the design says "C0402",
@@ -12424,6 +13153,340 @@ proc ::mUtilMenu::BomCompareReport { pBomRecs pDesignRows pScope pFile } {
     # says so before the findings get dismissed as noise.
     if { $lKbHits > 0 } {
         lappend lLines "  (+ $lKbHits placement(s) matched through KNOWLEDGE_BASE_PCBFOOTPRINT_1)"
+    }
+
+    return [list [join $lLines "\n"] $lFound]
+}
+
+#-----------------------------------------------------------------------------
+# BOM Consistency Check - the comparison
+#
+# TWO RULES, ONE IN EACH DIRECTION, and that is what makes this a different check
+# from BOM Footprint Check rather than a third rule inside it.  That one asks
+# only what the BOM claims and lets the design answer; this one asks both
+# documents about each other, because the question is whether they agree on WHAT
+# IS ON THE BOARD, and each of them can be the one that is wrong:
+#
+#   RULE1  BOM -> design.  Every Part Reference the BOM calls for must be placed
+#          in the design AND not marked "/X".  A BOM line for a part the design
+#          does not have, or has but will not fit, is a part that gets bought and
+#          not used - or, far worse, a part the two documents disagree about on
+#          the day the board is built.
+#
+#   RULE2  design -> BOM.  Every part the design FITS - Optional empty or "N/A" -
+#          must appear in the BOM.  A fitted part missing from the BOM is a part
+#          nobody buys, and the board comes back with a hole in it.
+#
+# Parts the design marks "/X" are not asked about in rule 2 at all: they are not
+# being fitted, so the BOM is right to leave them out and right to list them if
+# some other build does fit them.  Neither is a finding.
+#
+# WHAT IS COMPARED IS THE REFERENCE DESIGNATOR - the design's ORN1, not its
+# ORN1A and ORN1B.  Both documents then name the same thing: a BOM lists
+# components to buy and a component is a package, so one BOM line for ORN1 meets
+# however many sections of it the schematic draws.  The design side arrives that
+# way already - see CollectPageRefOptional, which asks the database rather than
+# stripping the letter off the string - so both rules here are unchanged by it
+# except in what they print.
+#
+# THE SECTIONS COLLAPSE INTO ONE ANSWER, in both directions.  Rule 1 asks whether
+# ORN1 is fitted anywhere and gets one answer for the package; rule 2 reports a
+# package missing from the BOM once, listing the sections underneath, because
+# "ORN1 is not in the BOM" is one fact however many pages it is drawn on.
+#
+# Reads nothing - no file, no design, no Dbo call - only the two lists the two
+# dumps returned.  Same as BomCompareReport, and for the same reason: a rule can
+# be changed and tried on hand-written lists without walking a design again.
+#
+# Returns {text findings}; findings is the two rules' totals added up, which is
+# what the caller puts in its one Command Window line.
+#-----------------------------------------------------------------------------
+# Where one design row IS, as both rules name it: "SCH1 / P02. CPU", with the
+# Part Reference in front of it when that differs from the Reference Designator
+# the line is already headed by.
+#
+# Conditional on purpose.  "R6   SCH1 / P02" would say R6 twice on the ordinary
+# part that is most of the list; "ORN1A  SCH1 / P02" under a finding headed ORN1
+# says the one thing the heading cannot - which section, and therefore what to
+# search the page for.
+proc ::mUtilMenu::BomPlaceStr { pRow } {
+    set lRef   [lindex $pRow 0]
+    set lPart  [lindex $pRow 4]
+    set lWhere "[::mUtilMenu::OrDash [lindex $pRow 2]] / [::mUtilMenu::OrDash [lindex $pRow 3]]"
+
+    if { $lPart eq "" || $lPart eq $lRef } {
+        return $lWhere
+    }
+    return [format "%-14s %s" $lPart $lWhere]
+}
+
+proc ::mUtilMenu::BomConsistencyReport { pBomRecs pDesignRows pScope pFile } {
+    variable mBomCsPlacement
+    variable mBomCsSkipPrefix
+
+    set lLines [list]
+    set lFound 0
+
+    # Design side indexed by uppercase REFERENCE DESIGNATOR -> list of its
+    # placements, and the BOM side as a set of uppercase references.  Both are
+    # built once; the two rules walk opposite sides and neither walks a list
+    # twice.  BomIndexDesign keys on index 0, which is the Reference Designator
+    # here and the Part Reference in BOM Footprint Check's rows - the one proc
+    # serves both because both put the thing being compared first.
+    set lDistinct [::mUtilMenu::BomIndexDesign $pDesignRows lDsn]
+
+    # How many of the design's placements are sections of a multi-part package -
+    # the count that says the Reference Designator lookup did something.  Said in
+    # the report as well as in the Command Window dump, because the report is the
+    # half that gets pasted into a mail.
+    # The empty test is not redundant: DumpDesignRefOptional always fills index 4,
+    # but this proc is also run on hand-written lists from the Command Window, and
+    # a 4-element row would otherwise report every part as a multi-part section.
+    set lMulti 0
+    foreach lRow $pDesignRows {
+        set lPart [lindex $lRow 4]
+        if { $lPart ne "" && $lPart ne [lindex $lRow 0] } {
+            incr lMulti
+        }
+    }
+
+    array set lBom {}
+    foreach lRec $pBomRecs {
+        set lRef [lindex $lRec 0]
+        if { $lRef ne "" } {
+            lappend lBom([string toupper $lRef]) $lRec
+        }
+    }
+
+    lappend lLines "================================================================"
+    lappend lLines [::mUtilMenu::Banner "BOM Consistency Check"]
+    lappend lLines "================================================================"
+    lappend lLines [format "  %-18s %s" "design scope"   $pScope]
+    lappend lLines [format "  %-18s %s" "design parts"   "[llength $pDesignRows] placed, $lDistinct distinct Reference Designator(s)"]
+    lappend lLines [format "  %-18s %s" "BOM file"       [file nativename $pFile]]
+    lappend lLines [format "  %-18s %s" "BOM references" "[llength $pBomRecs], [array size lBom] distinct"]
+    lappend lLines [format "  %-18s %s" "compared on" \
+        "Reference Designator (ORN1), not Part Reference (ORN1A)"]
+    lappend lLines [format "  %-18s %s" "multi-part" \
+        "$lMulti placement(s) are a section of a multi-part package"]
+    lappend lLines [format "  %-18s %s" "reference match" \
+        [expr { $mBomCsPlacement ? "equal, or one A-Z placement letter (mBomCsPlacement 1)" \
+                                 : "equal (case-insensitive)" }]]
+    lappend lLines ""
+
+    #-------------------------------------------------------------------------
+    # RULE 1 - every Part Reference the BOM names must be in the design, fitted
+    #
+    # ONE FINDING PER BOM REFERENCE, not per BOM row: a designator named on three
+    # rows is one disagreement with the design, and reporting it three times would
+    # pad the list without adding a fact to it.  The first row it appeared on is
+    # the one quoted, so it can still be found in the workbook.
+    #
+    # "FITTED" IS DECIDED OVER ALL ITS PLACEMENTS, and for a multi-part package
+    # the placements are its sections.  ORN1A fitted and ORN1B "/X" is a package
+    # that goes on the board, so the BOM line for ORN1 is correct and this is not
+    # a finding.  Only a designator whose every placement is "/X" is reported -
+    # the case where the BOM asks for a part the design fits nowhere.  The mixed
+    # ones are counted and said at the end rather than listed: on a multi-part
+    # package that pattern is ordinary, not an error.
+    #-------------------------------------------------------------------------
+    lappend lLines "BOM_Consistency_Check_RULE1 - Part Reference in the BOM, not fitted in the design"
+    lappend lLines "   (the BOM's reference exists, but DSN mark not populated)"
+    lappend lLines "----------------------------------------------------------------"
+
+    set lMiss  [list]
+    set lNotFit [list]
+    set lMixed 0
+    array set lSeen {}
+    foreach lRec $pBomRecs {
+        set lRef [lindex $lRec 0]
+        set lKey [string toupper $lRef]
+        if { $lRef eq "" || [info exists lSeen($lKey)] } {
+            continue
+        }
+        set lSeen($lKey) 1
+
+        set lRows [::mUtilMenu::BomConsistMatchRows $lKey lDsn]
+        if { ![llength $lRows] } {
+            lappend lMiss $lRec
+            continue
+        }
+
+        set lFit 0
+        set lX   0
+        set lWhere [list]
+        foreach lRow $lRows {
+            if { [::mUtilMenu::BomOptionalIsX [lindex $lRow 1]] } {
+                incr lX
+                lappend lWhere [::mUtilMenu::BomPlaceStr $lRow]
+            } else {
+                incr lFit
+            }
+        }
+        if { $lX > 0 && $lFit == 0 } {
+            lappend lNotFit [list $lRec $lWhere]
+        } elseif { $lX > 0 } {
+            incr lMixed
+        }
+    }
+
+    if { [llength $lMiss] == 0 && [llength $lNotFit] == 0 } {
+        lappend lLines "BOM_Consistency_Check_RULE1: No mis-matching Part Reference found."
+    } else {
+        foreach lRec $lMiss {
+            lappend lLines [format "  %-16s %-34s BOM sheet \"%s\" row %s" \
+                [lindex $lRec 0] "not in the design" \
+                [lindex $lRec 2] [::mUtilMenu::OrDash [lindex $lRec 3]]]
+        }
+        # The "/X" ones after the missing ones, and labelled: they are two
+        # different conversations with two different people - one with whoever
+        # owns the BOM, one with whoever marked the part not-fitted - and a reader
+        # sorting them out by eye from a mixed list is the reader doing the
+        # report's job.
+        foreach lEnt $lNotFit {
+            set lRec [lindex $lEnt 0]
+            lappend lLines [format "  %-16s %-34s BOM sheet \"%s\" row %s" \
+                [lindex $lRec 0] "in the design but marked \"/X\"" \
+                [lindex $lRec 2] [::mUtilMenu::OrDash [lindex $lRec 3]]]
+            foreach lW [lindex $lEnt 1] {
+                lappend lLines [format "  %-16s   %s" "" $lW]
+            }
+        }
+        lappend lLines ""
+        lappend lLines "  -> [llength $lMiss] not in the design, [llength $lNotFit] marked \"/X\" - [expr { [llength $lMiss] + [llength $lNotFit] }] Part Reference(s) the BOM calls for and the design does not fit"
+        incr lFound [expr { [llength $lMiss] + [llength $lNotFit] }]
+    }
+    if { $lMixed > 0 } {
+        lappend lLines "  ($lMixed BOM reference(s) have one placement fitted and another \"/X\" - fitted, so not reported)"
+    }
+    lappend lLines ""
+
+    #-------------------------------------------------------------------------
+    # RULE 2 - every part the design FITS must be in the BOM
+    #
+    # ONE FINDING PER REFERENCE DESIGNATOR, with its placements listed under it.
+    # "ORN1 is not in the BOM" is one fact about one component to buy, and a
+    # four-section package would otherwise be four findings saying the same
+    # thing - which is exactly the noise moving the comparison off the Part
+    # Reference was meant to remove.  The placements are still printed, because
+    # they are where to go and look: section and page, one line each.
+    #
+    # The same designator on the same page twice is one placement, not two - a
+    # part collected once per instance can repeat when the same page is reached
+    # through two occurrences.
+    #
+    # Only Optional "" or "N/A" is asked about: "/X" is not fitted so the BOM is
+    # right to omit it, and any other value is one this check has not been taught
+    # to read - see the block above BomOptionalIsX.
+    #
+    # AND NOT THE SKIP LIST - mBomCsSkipPrefix, "VT" in a single-part package by
+    # default.  Those are placed in the design and are not bought, so asking the
+    # BOM about them produces a finding per part that is true and useless.  The
+    # test is applied AFTER the fitted one, so what it excludes is exactly the
+    # set this rule would otherwise have looked up, and the count at the end is
+    # the count of real lookups dropped.  RULE1 does not consult it: a BOM that
+    # lists a VT part has made a claim, and claims are still checked.
+    #-------------------------------------------------------------------------
+    lappend lLines "BOM_Consistency_Check_RULE2 - fitted part in the design, not in the BOM"
+    lappend lLines "   (the DSN exists but not appear in xlsx BOM)"
+    lappend lLines "----------------------------------------------------------------"
+
+    set lNoBom   [list]
+    set lOther   0
+    set lPlaces  0
+    set lSkipped 0
+    set lSkipEg  [list]
+    array set lNoIdx {}
+    foreach lRow $pDesignRows {
+        set lRef [lindex $lRow 0]
+        set lOpt [lindex $lRow 1]
+        if { $lRef eq "" } {
+            continue
+        }
+        if { ![::mUtilMenu::BomOptionalIsFitted $lOpt] } {
+            if { ![::mUtilMenu::BomOptionalIsX $lOpt] } {
+                incr lOther
+            }
+            continue
+        }
+
+        # The Part Reference carries the prefix; on the single-part packages this
+        # can fire on it is the same string as the Reference Designator anyway.
+        # OrDash is not used - an empty one must stay empty for BomCsSkipped.
+        set lPartRef [lindex $lRow 4]
+        if { $lPartRef eq "" } {
+            set lPartRef $lRef
+        }
+        if { [::mUtilMenu::BomCsSkipped $lPartRef [lindex $lRow 5]] } {
+            incr lSkipped
+            if { [llength $lSkipEg] < 6 && [lsearch -exact $lSkipEg $lPartRef] < 0 } {
+                lappend lSkipEg $lPartRef
+            }
+            continue
+        }
+
+        set lKey [string toupper $lRef]
+        if { [::mUtilMenu::BomHasRef $lKey lBom] } {
+            continue
+        }
+
+        set lWhere [::mUtilMenu::BomPlaceStr $lRow]
+        if { ![info exists lNoIdx($lKey)] } {
+            set lNoIdx($lKey) [llength $lNoBom]
+            lappend lNoBom [list $lRef $lOpt [list $lWhere]]
+            incr lPlaces
+            continue
+        }
+
+        set lAt   [set lNoIdx($lKey)]
+        set lHave [lindex [lindex $lNoBom $lAt] 2]
+        if { [lsearch -exact $lHave $lWhere] >= 0 } {
+            continue
+        }
+        lset lNoBom $lAt 2 [linsert $lHave end $lWhere]
+        incr lPlaces
+    }
+
+    if { [llength $lNoBom] == 0 } {
+        lappend lLines "BOM_Consistency_Check_RULE2: No mis-matching Part Reference found."
+    } else {
+        foreach lEnt $lNoBom {
+            set lWh [lindex $lEnt 2]
+            if { [llength $lWh] == 1 } {
+                lappend lLines [format "  %-16s Optional %-8s %s" \
+                    [lindex $lEnt 0] "\"[lindex $lEnt 1]\"" [lindex $lWh 0]]
+                continue
+            }
+            # A multi-part package, or a designator placed more than once: the
+            # heading carries the count and every placement gets its own line.
+            lappend lLines [format "  %-16s Optional %-8s %d placement(s):" \
+                [lindex $lEnt 0] "\"[lindex $lEnt 1]\"" [llength $lWh]]
+            foreach lW $lWh {
+                lappend lLines [format "  %-16s   %s" "" $lW]
+            }
+        }
+        lappend lLines ""
+        lappend lLines "  -> [llength $lNoBom] fitted Reference Designator(s) not found in the BOM, over $lPlaces placement(s)"
+        incr lFound [llength $lNoBom]
+    }
+
+    # What the skip list took out, named and counted.  Printed whether or not
+    # the rule found anything: "no findings" after silently dropping two hundred
+    # parts is not the same sentence as "no findings", and the reader is the one
+    # who has to know which of the two they are reading.
+    if { $lSkipped > 0 } {
+        set lMore ""
+        if { $lSkipped > [llength $lSkipEg] } {
+            set lMore ", ..."
+        }
+        lappend lLines "  ($lSkipped fitted part(s) not looked up - single-part package and the Part Reference starts with [join $mBomCsSkipPrefix {, }]: [join $lSkipEg {, }]$lMore)"
+    }
+
+    # Said whether or not rule 2 found anything, and only when there are any: an
+    # Optional value neither rule reads is a part NEITHER rule has looked at, and
+    # a reader who does not know that will read "no findings" as "all checked".
+    if { $lOther > 0 } {
+        lappend lLines "  ($lOther part(s) carry an Optional value that is neither \"\", \"N/A\" nor \"/X\" - not checked by either rule; see the design dump in the Command Window)"
     }
 
     return [list [join $lLines "\n"] $lFound]
@@ -12684,12 +13747,267 @@ proc ::mUtilMenu::DoBomFootprintCheck { pVia } {
 }
 
 #=============================================================================
+# BOM Consistency Check - the dialog
+#
+# Same three parts as BOM Footprint Check and deliberately the same shape: one
+# .xlsx field with a Browse..., Execute and Close underneath, Return on Execute
+# and Escape on Close.  The two checks are run minutes apart by the same person
+# on the same workbook, and a second dialog that behaved differently would be a
+# second set of habits for no reason.
+#=============================================================================
+
+# Close does nothing else, as asked: no check runs, nothing is read, the window
+# goes away.
+proc ::mUtilMenu::CloseBomConsistencyCheck { } {
+    variable mBomCsWin
+    catch { destroy $mBomCsWin }
+}
+
+# The result window's Close: the report AND the dialog behind it.  Execute takes
+# the dialog down before the work starts, so there is normally nothing left to
+# close - this is here for the paths where there is, and so that "Close closes
+# the BOM Consistency Check window" is true however the user got here.
+proc ::mUtilMenu::CloseResultAndBomConsist { } {
+    ::mUtilMenu::CloseResultWindow
+    ::mUtilMenu::CloseBomConsistencyCheck
+}
+
+# Browse for the .xlsx.  Starts at the folder the field names, then mBomInitDir,
+# then mCmpInitDir - the same ladder BrowseBomFile climbs, and the same folder is
+# written back, because both dialogs are looking for a BOM and they are looking
+# in the same place.  Only the folder is remembered; see mBomCsFile.
+proc ::mUtilMenu::BrowseBomConsistFile { } {
+    variable mBomCsWin
+    variable mBomCsFile
+    variable mBomInitDir
+    variable mCmpInitDir
+
+    set lOpts [list \
+        -parent $mBomCsWin \
+        -title "Select BOM File" \
+        -defaultextension ".xlsx" \
+        -filetypes { {"Excel Workbook" {.xlsx}} {"All Files" *} }]
+
+    set lDir ""
+    if { [string trim $mBomCsFile] ne "" } {
+        set lDir [file dirname [string trim $mBomCsFile]]
+    }
+    if { ![file isdirectory $lDir] } {
+        set lDir $mBomInitDir
+    }
+    if { ![file isdirectory $lDir] } {
+        set lDir $mCmpInitDir
+    }
+    if { [file isdirectory $lDir] } {
+        lappend lOpts -initialdir $lDir
+    }
+
+    set lFile [eval tk_getOpenFile $lOpts]
+    if { $lFile eq "" } {
+        return 0
+    }
+
+    set mBomCsFile [file nativename $lFile]
+    ::mUtilMenu::RememberBomDir [file dirname $lFile]
+    return 1
+}
+
+# Execute: both of the things that can go wrong first, then all of the work.
+#
+# THE SCOPE IS CHECKED BEFORE ANYTHING IS WALKED and the .xlsx before even that,
+# for the reasons spelled out on DoBomFootprintCheckExecute: both tests are free,
+# and a design walk thrown away because a field was empty is not.
+#
+# WHAT THE SCOPE HAS TO BE: a schematic (_DboSchematic) or the Design (.DSN).
+# Anything else - a page, the .OPJ, nothing at all - closes the dialog without
+# running, which is what this check was asked to do.  BomCheckScope puts up the
+# message box that says which refusal it is; it knows, and this does not.
+#
+# THE .OPJ IS REFUSED ON PURPOSE even though it resolves to the same pages the
+# .DSN under it would.  It is the one restriction here that is a decision rather
+# than a necessity, and it is the request's: the two things that can be clicked
+# are the schematic and the design.  Widening it is this list, in the call below:
+#     [list schematic design project]
+#
+# THE DIALOG COMES DOWN BEFORE THE WORK, not after - the dumps are the thing on
+# screen while they scroll past, and a dialog in front of them is in the way.
+# The two exceptions are the field the user can fix from here: an empty BOM file
+# and one that cannot be read leave the window UP, because the fix is a Browse
+# away and closing the window somebody is standing in to correct a typo helps
+# nobody.
+proc ::mUtilMenu::DoBomConsistencyCheckExecute { } {
+    variable mBomCsFile
+
+    set lFile [string trim $mBomCsFile]
+    ::mUtilMenu::Trace "BOM Consistency Check Execute: $lFile"
+
+    if { $lFile eq "" } {
+        catch { capDisplayMessageBox "Please select a BOM file (.xlsx)." \
+                                     "BOM Consistency Check" }
+        return true
+    }
+    if { ![file readable $lFile] } {
+        catch { capDisplayMessageBox "Cannot read:\n\n$lFile" \
+                                     "BOM Consistency Check" }
+        return true
+    }
+
+    # A path typed into the field rather than browsed to is remembered here -
+    # Browse writes the folder as it goes, this catches the other way in.
+    catch { ::mUtilMenu::RememberBomDir [file dirname $lFile] }
+
+    set lScope [::mUtilMenu::BomCheckScope "BOM Consistency Check" \
+                    [list schematic design]]
+    if { [lindex $lScope 0] eq "" } {
+        ::mUtilMenu::CloseBomConsistencyCheck
+        return true
+    }
+
+    ::mUtilMenu::CloseBomConsistencyCheck
+
+    # The design side first, and allowed to fail without taking the BOM side with
+    # it: two independent readings of two different files, and a design that will
+    # not walk is no reason to withhold what the workbook says.
+    set lDsnRows [list]
+    set lDsnOk   1
+    if { [catch {
+        set lDsnRows [::mUtilMenu::DumpDesignRefOptional [lindex $lScope 2] [lindex $lScope 1]]
+    } lErr] } {
+        set lDsnOk 0
+        ::mUtilMenu::Trace "BOM Consistency Check, design side failed -> $lErr"
+        ::mUtilMenu::Out "BOM Consistency Check - design side FAILED: $lErr"
+        catch { capDisplayMessageBox "Could not read the design:\n\n[lindex $lScope 1]\n\n$lErr" \
+                                     "BOM Consistency Check" }
+    }
+
+    ::mUtilMenu::Out ""
+    set lBomRecs [list]
+    set lBomOk   1
+    if { [catch { set lBomRecs [::mUtilMenu::DumpBomFootprint $lFile \
+                                    "BOM Consistency Check"] } lErr] } {
+        set lBomOk 0
+        ::mUtilMenu::Trace "BOM Consistency Check, BOM side failed -> $lErr"
+        ::mUtilMenu::Out "BOM Consistency Check - BOM side FAILED: $lErr"
+        catch { capDisplayMessageBox "Could not read the workbook:\n\n[file tail $lFile]\n\n$lErr" \
+                                     "BOM Consistency Check" }
+    }
+
+    # NEITHER HALF MISSING IS ALLOWED TO BECOME A RESULT, and here it would lie in
+    # both directions at once: with the design unreadable rule 1 reports the whole
+    # BOM as not fitted and rule 2 reports nothing at all; with the BOM unreadable
+    # rule 1 checks nothing and rule 2 reports every fitted part in the design.
+    # Either way the report would be confident and wrong, so it says what happened
+    # instead of scoring it.
+    if { !$lDsnOk || !$lBomOk } {
+        set lWhich [expr { !$lDsnOk && !$lBomOk ? "Neither side" : \
+                          (!$lDsnOk ? "The design side" : "The BOM side") }]
+        set lTxt "[::mUtilMenu::Banner {BOM Consistency Check}]\n\n$lWhich could not be read - see the Command Window.\n\nNo comparison was run: a missing half would make the two rules\nreport either everything or nothing, and both are wrong."
+        ::mUtilMenu::Out "BOM Consistency Check - no comparison run ($lWhich could not be read)"
+        catch { ::mUtilMenu::ShowResultWindow "BOM Consistency Check - [::mUtilMenu::VerStr]" \
+                    $lTxt "::mUtilMenu::CloseResultAndBomConsist" }
+        return true
+    }
+
+    set lRes   [::mUtilMenu::BomConsistencyReport $lBomRecs $lDsnRows \
+                    [lindex $lScope 1] $lFile]
+    set lTxt   [lindex $lRes 0]
+    set lFound [lindex $lRes 1]
+
+    # The report goes to the result window, where it can be selected and copied;
+    # one line goes to the Command Window so the log says the check ran and what
+    # it came to.
+    ::mUtilMenu::Out ""
+    ::mUtilMenu::Out "BOM Consistency Check - [expr { $lFound == 0 ? "no findings" : "$lFound finding(s)" }], report window opened"
+
+    ::mUtilMenu::ShowResultWindow "BOM Consistency Check - [::mUtilMenu::VerStr]" \
+        $lTxt "::mUtilMenu::CloseResultAndBomConsist"
+    return true
+}
+
+proc ::mUtilMenu::DoBomConsistencyCheck { pVia } {
+    variable mBomCsWin
+
+    ::mUtilMenu::Trace "BOM Consistency Check callback reached via $pVia"
+
+    if { [catch { package require Tk } lErr] } {
+        set lMsg "Tk is not available in this Capture session.\n\nSee section 1.4 \"Capture TCL/Tk Advanced Environment Setup\"\nof OrCAD_Capture_TclTk_Extensions.pdf (p.15-16).\n\nTk reported: $lErr"
+        ::mUtilMenu::Out "mUtil: $lMsg"
+        catch { capDisplayMessageBox $lMsg "mUtil - BOM Consistency Check" }
+        return true
+    }
+
+    ::mUtilMenu::HideTkRoot
+
+    # Already open - raise it rather than building a second copy.
+    if { [winfo exists $mBomCsWin] } {
+        catch {
+            wm deiconify $mBomCsWin
+            raise $mBomCsWin
+            focus $mBomCsWin
+        }
+        return true
+    }
+
+    toplevel $mBomCsWin
+    wm title $mBomCsWin "BOM Consistency Check"
+    wm resizable $mBomCsWin 1 0
+    wm protocol $mBomCsWin WM_DELETE_WINDOW "::mUtilMenu::CloseBomConsistencyCheck"
+
+    # Owned by the Capture main window so it cannot get lost behind it -
+    # SetAppWindowAsParent, PDF p.134, same as the other dialogs.
+    catch { SetAppWindowAsParent [expr { [winfo id $mBomCsWin] }] }
+
+    set lBody $mBomCsWin.body
+    frame $lBody -padx 10 -pady 10
+    pack $lBody -side top -fill both -expand 1
+
+    label  $lBody.lbl -text "BOM File (.xlsx):" -anchor w
+    entry  $lBody.ent -width 60 -textvariable ::mUtilMenu::mBomCsFile
+    button $lBody.btn -text "Browse..." -width 10 \
+        -command "::mUtilMenu::BrowseBomConsistFile"
+
+    grid $lBody.lbl -row 0 -column 0 -sticky w  -padx {0 6} -pady 4
+    grid $lBody.ent -row 0 -column 1 -sticky ew -padx {0 6} -pady 4
+    grid $lBody.btn -row 0 -column 2 -sticky e            -pady 4
+
+    # What it is going to be run against, said on the dialog rather than only in
+    # the refusal: the Project Manager selection is half the input and it is not
+    # on this window, so somebody who has just clicked a page has no way to know
+    # that from here until Execute tells them.
+    label $lBody.hint -anchor w -foreground gray40 \
+        -text "Select a schematic or the Design (.DSN) in the Project Manager before Execute."
+    grid $lBody.hint -row 1 -column 0 -columnspan 3 -sticky w -pady {0 2}
+
+    grid columnconfigure $lBody 1 -weight 1
+
+    # bottom: Execute / Close
+    set lBtns $mBomCsWin.btns
+    frame $lBtns -padx 10
+    pack $lBtns -side bottom -fill x
+
+    button $lBtns.execute -text "Execute" -width 12 -default active \
+        -command "::mUtilMenu::DoBomConsistencyCheckExecute"
+    button $lBtns.close   -text "Close"   -width 12 \
+        -command "::mUtilMenu::CloseBomConsistencyCheck"
+
+    pack $lBtns.close   -side right -padx {6 0} -pady {4 10}
+    pack $lBtns.execute -side right          -pady {4 10}
+
+    bind $mBomCsWin <Return> "::mUtilMenu::DoBomConsistencyCheckExecute"
+    bind $mBomCsWin <Escape> "::mUtilMenu::CloseBomConsistencyCheck"
+
+    focus $lBody.ent
+    return true
+}
+
+#=============================================================================
 # Path A - mUtil top-level menu, via InsertXMLMenu
 #=============================================================================
 
 proc ::mUtilMenu::XmlSchematicCompare { args } { return [DoSchematicCompare   "mUtil menu"] }
 proc ::mUtilMenu::XmlSchematicCheck   { args } { return [DoSchematicCheck     "mUtil menu"] }
 proc ::mUtilMenu::XmlBomFootprint     { args } { return [DoBomFootprintCheck  "mUtil menu"] }
+proc ::mUtilMenu::XmlBomConsistency   { args } { return [DoBomConsistencyCheck "mUtil menu"] }
 proc ::mUtilMenu::XmlClosePage        { args } { return [DoClosePage          "mUtil menu"] }
 
 proc ::mUtilMenu::initXmlMenu { } {
@@ -12711,6 +14029,11 @@ proc ::mUtilMenu::initXmlMenu { } {
             "::mUtilMenu::XmlBomFootprint" ""
         RegisterAction "mUtilBomFpEnabler" "::mUtilMenu::True" "" \
             "::mUtilMenu::Enabler"         ""
+
+        RegisterAction "mUtilBomCsAction"  "::mUtilMenu::True" "" \
+            "::mUtilMenu::XmlBomConsistency" ""
+        RegisterAction "mUtilBomCsEnabler" "::mUtilMenu::True" "" \
+            "::mUtilMenu::Enabler"           ""
 
         RegisterAction "mUtilClosePageAction"  "::mUtilMenu::True" "" \
             "::mUtilMenu::XmlClosePage" ""
@@ -12745,11 +14068,20 @@ proc ::mUtilMenu::initXmlMenu { } {
 
         # Anchored after Schematic Check for the same reason, and placed here so
         # the plain insertion order says the same thing: Schematic Compare /
-        # Schematic Check / BOM Footprint Check / Close Page.
+        # Schematic Check / BOM Footprint Check / BOM Consistency Check /
+        # Close Page.
         InsertXMLMenu [list \
             [list $::mUtilMenu::mMenuId "mUtilBomFp"] "1" "mUtilSchCheck" \
             [list "action" "BOM Footprint Check" "0" \
                   "mUtilBomFpAction" "mUtilBomFpEnabler" "" ""] \
+            ""]
+
+        # Anchored after BOM Footprint Check - the two BOM items belong next to
+        # each other, and this one was asked for after that one.
+        InsertXMLMenu [list \
+            [list $::mUtilMenu::mMenuId "mUtilBomCs"] "1" "mUtilBomFp" \
+            [list "action" "BOM Consistency Check" "0" \
+                  "mUtilBomCsAction" "mUtilBomCsEnabler" "" ""] \
             ""]
 
         InsertXMLMenu [list \
@@ -12771,24 +14103,28 @@ proc ::mUtilMenu::initXmlMenu { } {
 proc ::mUtilMenu::PageSchematicCompare   { pPage pOcc } { DoSchematicCompare  "Accessories (page)" }
 proc ::mUtilMenu::PageSchematicCheck     { pPage pOcc } { DoSchematicCheck    "Accessories (page)" }
 proc ::mUtilMenu::PageBomFootprint       { pPage pOcc } { DoBomFootprintCheck "Accessories (page)" }
+proc ::mUtilMenu::PageBomConsistency     { pPage pOcc } { DoBomConsistencyCheck "Accessories (page)" }
 proc ::mUtilMenu::PageClosePage          { pPage pOcc } { DoClosePage         "Accessories (page)" }
 proc ::mUtilMenu::DesignSchematicCompare { pLib }       { DoSchematicCompare  "Accessories (design)" }
 proc ::mUtilMenu::DesignSchematicCheck   { pLib }       { DoSchematicCheck    "Accessories (design)" }
 proc ::mUtilMenu::DesignBomFootprint     { pLib }       { DoBomFootprintCheck "Accessories (design)" }
+proc ::mUtilMenu::DesignBomConsistency   { pLib }       { DoBomConsistencyCheck "Accessories (design)" }
 proc ::mUtilMenu::DesignClosePage        { pLib }       { DoClosePage         "Accessories (design)" }
 
 proc ::mUtilMenu::addPageAccessoryMenu { } {
-    AddAccessoryMenu "mUtil" "Schematic Compare"   "::mUtilMenu::PageSchematicCompare"
-    AddAccessoryMenu "mUtil" "Schematic Check"     "::mUtilMenu::PageSchematicCheck"
-    AddAccessoryMenu "mUtil" "BOM Footprint Check" "::mUtilMenu::PageBomFootprint"
-    AddAccessoryMenu "mUtil" "Close Page"          "::mUtilMenu::PageClosePage"
+    AddAccessoryMenu "mUtil" "Schematic Compare"     "::mUtilMenu::PageSchematicCompare"
+    AddAccessoryMenu "mUtil" "Schematic Check"       "::mUtilMenu::PageSchematicCheck"
+    AddAccessoryMenu "mUtil" "BOM Footprint Check"   "::mUtilMenu::PageBomFootprint"
+    AddAccessoryMenu "mUtil" "BOM Consistency Check" "::mUtilMenu::PageBomConsistency"
+    AddAccessoryMenu "mUtil" "Close Page"            "::mUtilMenu::PageClosePage"
 }
 
 proc ::mUtilMenu::addDesignAccessoryMenu { } {
-    AddAccessoryMenu "mUtil" "Schematic Compare"   "::mUtilMenu::DesignSchematicCompare"
-    AddAccessoryMenu "mUtil" "Schematic Check"     "::mUtilMenu::DesignSchematicCheck"
-    AddAccessoryMenu "mUtil" "BOM Footprint Check" "::mUtilMenu::DesignBomFootprint"
-    AddAccessoryMenu "mUtil" "Close Page"          "::mUtilMenu::DesignClosePage"
+    AddAccessoryMenu "mUtil" "Schematic Compare"     "::mUtilMenu::DesignSchematicCompare"
+    AddAccessoryMenu "mUtil" "Schematic Check"       "::mUtilMenu::DesignSchematicCheck"
+    AddAccessoryMenu "mUtil" "BOM Footprint Check"   "::mUtilMenu::DesignBomFootprint"
+    AddAccessoryMenu "mUtil" "BOM Consistency Check" "::mUtilMenu::DesignBomConsistency"
+    AddAccessoryMenu "mUtil" "Close Page"            "::mUtilMenu::DesignClosePage"
 }
 
 proc ::mUtilMenu::initAccessoryMenu { } {
@@ -12818,12 +14154,14 @@ proc ::mUtilMenu::remove { } {
     ::mUtilMenu::CloseSchematicCompare
     ::mUtilMenu::CloseSchematicCheck
     ::mUtilMenu::CloseBomFootprintCheck
+    ::mUtilMenu::CloseBomConsistencyCheck
     ::mUtilMenu::ClosePageSelector
     ::mUtilMenu::CloseResultWindow
     catch {
         DeleteXMLMenu [list $::mUtilMenu::mMenuId "mUtilSchCompare"]
         DeleteXMLMenu [list $::mUtilMenu::mMenuId "mUtilSchCheck"]
         DeleteXMLMenu [list $::mUtilMenu::mMenuId "mUtilBomFp"]
+        DeleteXMLMenu [list $::mUtilMenu::mMenuId "mUtilBomCs"]
         DeleteXMLMenu [list $::mUtilMenu::mMenuId "mUtilExpOut"]
         DeleteXMLMenu [list $::mUtilMenu::mMenuId "mUtilClosePage"]
         DeleteXMLMenu [list $::mUtilMenu::mMenuId]
